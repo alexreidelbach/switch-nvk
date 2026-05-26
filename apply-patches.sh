@@ -13,14 +13,13 @@ if [ ! -f "$PATCH" ]; then echo "ERROR: $PATCH missing"; exit 1; fi
 if [ ! -d "$TREE" ]; then echo "ERROR: $TREE missing (extract Mesa 25.0.7 there first)"; exit 1; fi
 
 cd "$TREE"
-# -N/--forward: ignore already-applied hunks (idempotent). -p1: strip the a/ b/ prefix.
-if patch -p1 -N --dry-run < "$PATCH" >/dev/null 2>&1; then
-  patch -p1 -N < "$PATCH"
-  echo "OK: Switch source patches applied to $TREE"
+# Idempotency: DETECT_OS_HORIZON only exists in our patched detect_os.h. If it's already there,
+# the tree is patched — skip (avoids patch(1) writing .rej noise into a correct tree).
+if grep -q "DETECT_OS_HORIZON" src/util/detect_os.h 2>/dev/null; then
+  echo "OK: tree already carries the Switch patches (nothing to do)"
 else
-  # Dry-run failed => either fully applied already, or a hunk truly conflicts.
-  patch -p1 -N < "$PATCH" 2>&1 | grep -v "previously applied" || true
-  echo "NOTE: patches already present (or a hunk needs review) — see output above"
+  patch -p1 < "$PATCH"
+  echo "OK: Switch source patches applied to $TREE"
 fi
 
 # The compat shim, stub headers, and build scripts live alongside this file and need no patching:
