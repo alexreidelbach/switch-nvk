@@ -1,0 +1,124 @@
+--- a/src/util/u_endian.h	2026-05-26 02:51:48.294643300 +0000
++++ b/src/util/u_endian.h
+@@ -89,6 +89,19 @@
+ 
+ #endif
+ 
++/* Switch port: newlib/horizon has no usable <endian.h> __BYTE_ORDER, and the platform
++ * isn't matched above. Fall back to the GCC/Clang built-in byte-order macros, which are
++ * always defined regardless of libc headers. */
++#if !defined(UTIL_ARCH_LITTLE_ENDIAN) && !defined(UTIL_ARCH_BIG_ENDIAN) && defined(__BYTE_ORDER__)
++# if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#  define UTIL_ARCH_LITTLE_ENDIAN 1
++#  define UTIL_ARCH_BIG_ENDIAN 0
++# elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#  define UTIL_ARCH_LITTLE_ENDIAN 0
++#  define UTIL_ARCH_BIG_ENDIAN 1
++# endif
++#endif
++
+ #if !defined(UTIL_ARCH_LITTLE_ENDIAN) || !defined(UTIL_ARCH_BIG_ENDIAN)
+ # error "UTIL_ARCH_LITTLE_ENDIAN and/or UTIL_ARCH_BIG_ENDIAN were unset."
+ #elif UTIL_ARCH_LITTLE_ENDIAN == UTIL_ARCH_BIG_ENDIAN
+--- a/src/util/detect_os.h	2026-05-26 02:51:49.632931700 +0000
++++ b/src/util/detect_os.h
+@@ -91,6 +91,14 @@
+ #define DETECT_OS_POSIX 1
+ #endif
+ 
++/* Nintendo Switch (Horizon/libnx + newlib). newlib provides a POSIX-ish C library (unistd,
++ * time.h, sched_yield, pthreads via libnx) but lacks demand-paged mmap; treat it as POSIX
++ * (POSIX_LITE follows below) and let the few mmap users fall back to the compat stubs. */
++#if defined(__SWITCH__)
++#define DETECT_OS_HORIZON 1
++#define DETECT_OS_POSIX 1
++#endif
++
+ 
+ /*
+  * Make sure DETECT_OS_* are always defined, so that they can be used with #if
+@@ -146,5 +154,8 @@
+ #ifndef DETECT_OS_MANAGARM
+ #define DETECT_OS_MANAGARM 0
+ #endif
++#ifndef DETECT_OS_HORIZON
++#define DETECT_OS_HORIZON 0
++#endif
+ 
+ #endif /* DETECT_OS_H */
+--- a/src/c11/impl/threads_posix.c	2026-05-26 02:51:50.586461800 +0000
++++ b/src/c11/impl/threads_posix.c
+@@ -19,7 +19,8 @@
+     Use pthread_mutex_timedlock() for `mtx_timedlock()'
+     Otherwise use mtx_trylock() + *busy loop* emulation.
+ */
+-#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__)
++/* libnx's pthread has no pthread_mutex_timedlock(); fall back to the trylock+busy-loop emulation. */
++#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__) && !defined(__SWITCH__)
+ #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
+ #endif
+ 
+--- a/src/util/os_misc.c	2026-05-26 02:51:52.018194800 +0000
++++ b/src/util/os_misc.c
+@@ -57,7 +57,7 @@
+ #  include <unistd.h>
+ #  include <log/log.h>
+ #  include <cutils/properties.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || DETECT_OS_HORIZON
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
+@@ -332,6 +332,11 @@
+ #elif DETECT_OS_FUCHSIA
+    *size = zx_system_get_physmem();
+    return true;
++#elif DETECT_OS_HORIZON
++   /* Switch: newlib has no _SC_PHYS_PAGES. Report a fixed upper bound for the application memory
++    * region (~3 GiB); the actual VRAM/heap budget is taken from libnx svcGetInfo in the winsys. */
++   *size = (uint64_t)3072 << 20;
++   return true;
+ #else
+ #error unexpected platform in os_misc.c
+    return false;
+--- a/src/nouveau/vulkan/nvk_instance.c	2026-05-26 02:51:53.055932800 +0000
++++ b/src/nouveau/vulkan/nvk_instance.c
+@@ -168,6 +168,8 @@
+       nvk_create_drm_physical_device;
+    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
+ 
++   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
++#ifdef HAVE_DL_ITERATE_PHDR
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(nvk_CreateInstance);
+    if (!note) {
+@@ -183,8 +185,17 @@
+       goto fail_init;
+    }
+ 
+-   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
+    memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
++#else
++   /* Horizon/Switch has no dl_iterate_phdr / ELF build-id note; derive a stable driver SHA
++    * from the package version so the pipeline-cache UUID is deterministic across runs. */
++   {
++      struct mesa_sha1 sha1_ctx;
++      _mesa_sha1_init(&sha1_ctx);
++      _mesa_sha1_update(&sha1_ctx, PACKAGE_VERSION, sizeof(PACKAGE_VERSION) - 1);
++      _mesa_sha1_final(&sha1_ctx, instance->driver_build_sha);
++   }
++#endif
+ 
+ #if DETECT_OS_ANDROID
+    struct u_gralloc *u_gralloc = vk_android_init_ugralloc();
+--- a/src/vulkan/runtime/vk_image.h	2026-05-26 02:51:54.208722000 +0000
++++ b/src/vulkan/runtime/vk_image.h
+@@ -75,7 +75,7 @@
+    /* wsi_image_create_info::scanout */
+    bool wsi_legacy_scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_HORIZON
+    /* VK_EXT_drm_format_modifier
+     *
+     * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's

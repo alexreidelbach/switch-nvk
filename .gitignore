@@ -1,0 +1,18 @@
+# Big / reconstructable trees — NOT versioned (regenerated from upstream + apply-patches.sh).
+mesa-25/
+mesa/
+devkitpro-mesa/
+libdrm_nouveau/
+libc-switch/
+
+# Build outputs / generated.
+mb/
+native-prefix/
+native-tools/
+sysroot/
+crossfiles/
+
+# Logs.
+*.log
+
+# Keep: Dockerfile, *.sh, *.json, *.md, compat/, patches/, pristine-25.0.7/, UNDEFINED_SYMBOLS.txt
