@@ -1,10 +1,16 @@
 # PLAN_NVK.md — Port Mesa NVK (Vulkan) to the Switch GM20B + libnx nv services
 
-**Status:** PLAN (2026-05-25). Goal: a working open-source **Vulkan driver for Switch homebrew**
-(HOS/Atmosphère `.nro`), by porting Mesa's **NVK** to the Tegra X1 **GM20B** over **libnx nv
-services** — NO deko3d, NO NVIDIA L4T blob, NO dependence on Dan's private `ticohq/switch-nvk-vulkan`.
-End state: Aurora → Dawn-Vulkan → our NVK → GM20B, so TP renders at native Vulkan perf
-(the result Dan has via his private Mesa fork). See [[vulkan-nvk-switch-path]].
+> **⚠️ READ `RESUME_NVK.md` FIRST — it is the live state.** This file is the original plan; below it
+> is now PARTLY HISTORY. Done since: **M0 (Rust std) ✅** and **M1-build (NVK fully cross-compiles,
+> `libnvk.a` produced) ✅**. The exact remaining winsys/shim symbols are in `UNDEFINED_SYMBOLS.txt`.
+> **GOAL NARROWED**: the deliverable is ONLY a standalone Vulkan placeholder (M3 triangle), like
+> Dan's — **NO game/Aurora/port integration (M4 is OUT of scope)**. See [[dan-nvk-intel-and-goal]].
+
+**Status:** M0 + M1-build DONE (2026-05-25). Goal: a working open-source **Vulkan driver for Switch
+homebrew** (HOS/Atmosphère `.nro`), by porting Mesa's **NVK** to the Tegra X1 **GM20B** over **libnx
+nv services** — NO deko3d, NO NVIDIA L4T blob, NO dependence on Dan's private `ticohq/switch-nvk-vulkan`.
+End state (narrowed): a standalone `.nro` that **requires Vulkan and draws a triangle** via our own NVK.
+See [[vulkan-nvk-switch-path]].
 
 ## Why this is bounded (not "write a driver from scratch")
 NVK is open Mesa (`src/nouveau/`), already Vulkan-1.4 conformant on discrete Maxwell; GM20B is
@@ -35,8 +41,8 @@ guts we replace. NAK/NIL/compiler/`vulkan/` (NVK core) stay upstream-as-is.
 - **M0 — Mesa/NVK cross-builds for Switch.** meson cross-file → devkitA64 (aarch64-none-elf, newlib). Reconstruct Dan's `create-nvk-image.sh`. Expect to fight: Mesa's Linux/glibc/POSIX assumptions, the DRM/libdrm deps (we cut them), build only `nouveau` Vulkan + NAK. Install prefix `/opt/nvk-switch`. **This is the foundation + likely the fiddliest part.**
 - **M1 — winsys over nv + GM20B enum.** Reimplement device/bo/context (3 files) over libnx nv; fill `nv_device_info` for GM20B. Milestone: `vkCreateInstance` + `vkEnumeratePhysicalDevices` returns the GM20B on real HW (no render yet — prove the layer below, anti-pattern #4).
 - **M2 — memory + submission.** nvmap BOs + GPU VA bind (address_space) + channel/pushbuf submit (gpu_channel) + NvFence sync. Milestone: a trivial `vkQueueSubmit` completes without fault.
-- **M3 — first triangle.** WSI (ref Dan's public TriangleTest) + render pass/pipeline. Milestone: our NVK draws a triangle on the TV.
-- **M4 — Aurora integration.** Point `DAWN_SWITCH_NVK_ROOT` at our build, build dusklight Vulkan backend, run TP → game renders via Dawn-Vulkan-NVK.
+- **M3 — first triangle (THE GOAL).** WSI (ref Dan's public TriangleTest) + render pass/pipeline. Milestone: our NVK draws a triangle on the TV from a standalone `.nro`. **STOP HERE.**
+- ~~**M4 — Aurora integration.**~~ **OUT OF SCOPE** (user, 2026-05-25: "nada de jogo nem Port"). Do not wire NVK into Aurora/Dusklight/any game; the deliverable ends at the M3 placeholder.
 
 ## Open risks
 1. **Mesa cross-build on libnx/newlib** (M0) — Mesa assumes Linux. Biggest unknown.
