@@ -11,6 +11,17 @@ Last updated: 2026-05-27.
 ## ⭐ ROADMAP PROGRESS (2026-05-27 cont) — Tier 1.1 INDEXED DRAW ✅ on real Tegra
 
 Started the [`ROADMAP.md`](ROADMAP.md) march toward ports-ready (→ Dawn-over-Vulkan).
+- **Many draws + alpha blending ✅ (`nvk_multi.c`, ver 0.52.0-multi)** — the RGB "venn": an opaque dark
+  background quad (opaque pipeline, blend OFF) + 3 translucent quads R/G/B at alpha 0.5 (blend pipeline,
+  `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA`) overlapping in the centre. ONE render pass exercises **4 draws**, a
+  **pipeline switch** (opaque→blend), **4 descriptor-set switches** (one UBO colour+rect per object), and
+  **alpha blending**. All 4 are `vkCmdDrawIndexed` (unit quad: 4 verts + 6 indices). New shaders
+  `multi.{vert,frag}` (flat colour from a per-object UBO), added to `gen-shaders.sh` → `tri_shaders.h`
+  (`multi_vert_spv`/`multi_frag_spv`, purely additive — existing arrays byte-identical). On real Tegra the
+  sampled overlaps match the hand-computed sequential blend **byte-for-byte**: bg=0x1f1919,
+  R-only=0x100d8c, G-only=0x108c0d, B-only=0x8f0d0d, **centre R∩G∩B=0x834323 (35,67,131 as predicted)**,
+  `all5_distinct=1` → `MULTI-DRAW + ALPHA BLENDING PASSED`. **Tier 1.2 done.**
+  Build: `APP=nvk_multi TITLE="NVK Multi" VERSION="0.52.0-multi" bash winsys/build-nro.sh`.
 - **Indexed draw ✅ (`nvk_indexed.c`, ver 0.51.0-indexed)** — the same textured cube as `nvk_scene`
   but stored the way real meshes are: **24 UNIQUE verts + a 36-index buffer**, drawn via
   `vkCmdBindIndexBuffer` + `vkCmdDrawIndexed`. Records TWO command buffers (one binds a UINT16 index
@@ -25,8 +36,9 @@ Started the [`ROADMAP.md`](ROADMAP.md) march toward ports-ready (→ Dawn-over-V
   but FAKES the GPU → readback all zeros (the proven `nvk_scene` reads zero on Eden too). Use Eden only as
   a code-path/crash smoke; **pixel proof = real Tegra** (FTP the `.nro` to `sdmc:/switch/`, Sphaira
   boot-as-app, read `sdmc:/<app>.log`).
-- **NEXT on the roadmap = `nvk_multi`** (several objects in one render pass + pipeline/descriptor switches
-  + **alpha blending**), then `nvk_swapchain` (real WSI — the highest-value single step).
+- **NEXT on the roadmap = `nvk_swapchain`** (real WSI: `VK_KHR_surface`+`VK_KHR_swapchain` over libnx
+  `nwindow`/`vi`, zero-copy present — the highest-value single step, replaces the framebuffer-blit hack;
+  ref `dantiicu/vulkan-triangle-test-switch`).
 
 ---
 

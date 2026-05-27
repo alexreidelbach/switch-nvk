@@ -22,6 +22,7 @@ ends with a photo/log proof, just like the ones we already have.
 | Sascha Willems triangle | `nvk_poc` | an established PC Vulkan program's verbatim shaders run unmodified |
 | **Cubemap skybox** | `nvk_cubemap` | 6-layer `CUBE_COMPATIBLE` image, `TYPE_CUBE` view, **`samplerCube`** |
 | **Indexed draw (16+32)** | `nvk_indexed` | `vkCmdBindIndexBuffer` + `vkCmdDrawIndexed`, UINT16 **and** UINT32 (Tier 1.1 ✅) |
+| **Many draws + blending** | `nvk_multi` | 4 draws, 2 pipelines (opaque+blend), descriptor-set switches, **alpha blending** (Tier 1.2 ✅) |
 
 That covers: instance/device/queue, NAK vertex+fragment shaders, graphics pipelines,
 render passes, vertex/uniform buffers, 2D + cube textures, depth, and a real-time loop.
@@ -37,9 +38,12 @@ The primitives every real mesh/scene uses but we haven't exercised yet.
    32-bit).~~ **✅ DONE (2026-05-27)** — indexed cube (24 unique verts + 36-index buffer),
    both UINT16 and UINT32 verified on real Tegra (`L UINT16/UINT32: red=20069 white=364 => OK`,
    identical counts) + spins on the TV. *Every imported mesh is indexed; real geometry unblocked.*
-2. **Many draws + blending** — `nvk_multi`: several objects in one render pass with
-   pipeline/descriptor-set switches and **alpha blending** enabled. *Why:* real
-   frames are dozens-to-thousands of draws; transparency is needed for UI/particles.
+2. ~~**Many draws + blending** — `nvk_multi`: several objects in one render pass with
+   pipeline/descriptor-set switches and **alpha blending** enabled.~~ **✅ DONE (2026-05-27)**
+   — RGB venn (opaque bg + 3 translucent quads), 4 `vkCmdDrawIndexed`, opaque↔blend pipeline
+   switch, 4 descriptor-set switches. On Tegra the sampled overlaps match the hand-computed
+   `src_alpha`/`one_minus_src_alpha` blend **byte-for-byte** (centre R∩G∩B = 35,67,131 as predicted).
+   *Real frames are dozens-to-thousands of draws; transparency unblocked.*
 3. **Mipmaps + more formats** — `nvk_textures`: a mipmapped sampler, an **sRGB**
    format, and one **block-compressed** format (BC1/DXT1). *Why:* ported textures are
    mipmapped and often compressed; this exercises NIL's format/mip layout paths.
@@ -84,7 +88,7 @@ geometry/tessellation = nice-to-have, add only when a specific port asks for the
 
 ## Suggested order
 
-~~`nvk_indexed`~~ ✅ → **`nvk_multi` (NEXT)** → `nvk_swapchain` (the big one) → `nvk_textures` →
+~~`nvk_indexed`~~ ✅ → ~~`nvk_multi`~~ ✅ → **`nvk_swapchain` (the big one — NEXT)** → `nvk_textures` →
 `nvk_rtt` → `nvk_compute` → **Dawn-Vulkan bring-up**.
 
 Rationale: indexed + many-draws unblock real geometry immediately; the swapchain is the
