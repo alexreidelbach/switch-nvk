@@ -169,3 +169,25 @@ index 71dadab..03adbbc 100644
     /* VK_EXT_drm_format_modifier
      *
      * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
+
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -69,7 +69,17 @@
+    struct mme_value mask = mme_load(b);
+    struct mme_value reg = mme_load(b);
+ 
+-   mme_set_priv_reg(b, value, mask, reg);
++   /* SWITCH/Horizon PATCH: privileged GR register writes via the FECS falcon
++    * (SET_FALCON04) are BLOCKED for homebrew channels — the FECS raises an error
++    * and the kernel resets the channel, so every later submit returns Timeout
++    * (0xd5c). The two init priv-writes that use this path (clear bit3 of
++    * sm_disp_ctrl 0x419f78 "FP helper loads"; clear bit14 of warp_esr_report_mask
++    * 0x419e44 "disable OOB-address exceptions") are NON-ESSENTIAL robustness
++    * tweaks per the comments above. Skip the FECS write entirely; just consume
++    * the 3 inline args so the MME arg stream stays aligned. (This mesa tree is
++    * Switch-only.) */
++   (void)value; (void)mask; (void)reg;
++   /* was: mme_set_priv_reg(b, value, mask, reg); */
+ }
+ 
+ void

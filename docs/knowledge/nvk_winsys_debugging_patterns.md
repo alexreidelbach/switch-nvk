@@ -1,0 +1,32 @@
+---
+name: nvk-winsys-debugging-patterns
+description: "Hard-won anti-patterns / debugging heuristics for the standalone NVK-on-Switch winsys (D:\\switch-nvk), Maxwell GM20B bring-up"
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: 827a2abd-cef2-44f7-aecc-4979d9d434cf
+---
+
+Debugging patterns for the standalone **NVK Vulkan on Switch** effort (`D:\switch-nvk`, Tegra X1 GM20B). Companion to [[vulkan-nvk-switch-path]] (state) and the dusklight-specific [[dusklight-debugging-heuristics]] (different project). **Why:** several of these cost a full session each when ignored.
+
+1. **Decode every libnx `Result` BEFORE theorizing.** `R = MAKERESULT(module = R & 0x1FF, desc = R >> 9)`. Module 348 = LibnxNvidia. `0xd5c` = desc **6 = `LibnxNvidiaError_Timeout`**; `0xf5c` = desc 7 = InsufficientMemory. **A wrong decode (Timeout misread as InsufficientMemory) drove an ENTIRE session of bogus "memory-pressure / num_inflight_jobs / warmup-ramp" fixes.** Verify against libnx `result.h`, not memory.
+
+2. **`nvFenceWait` / nv waits take the timeout in MICROSECONDS, not nanoseconds.** Passing an ns-scale value (e.g. `2000000000` thinking "2s") = 2000 s ≈ **33 minutes** → looks like an infinite hang (long black screen). 2s = `2000000`. Cap ALL GPU waits in µs (drain, wait-syncs, drmSyncobjWait). **How to apply:** when an app "hangs" on a fence, first check the wait's timeout units.
+
+3. **A channel `Timeout` (`0xd5c`) AFTER a clean `kickoff` (rc=0) = the channel FAULTED during async GPU execution and got RESET** (`has_timedout` latched → all later submits Timeout), NOT a submit-time resource failure. The post-fault `EXEC drain rc=0x0 fence=N/max` is a **FALSE POSITIVE** — recovery force-advances the syncpt (`set_min_eq_max`) so the wait completes on a dead channel. **How to apply:** read the error notifier — `nvGpuChannelGetErrorNotification` → `NvNotification.info32` (NvNotificationType: 31=MMU fault, 25=GR illegal, 32=PBDMA, 8=idle); `nvGpuChannelGetErrorInfo` → `NvError {u32 type; u32 info[31]}` (type=2=GR; info[0]=intr, 0x80000=FECS bit19; info[1]=trapped method addr; info[3]=trapped data; info[4]=class).
+
+4. **Horizon BLOCKS homebrew privileged GR-register writes via the FECS falcon** (`SET_FALCON04`, method 0x2310, class 0xb197). NVK's 3D init does these in `nvk_mme_set_priv_reg` (`src/nouveau/vulkan/nvk_cmd_draw.c`) — clearing bit3 of `sm_disp_ctrl` (0x419f78) + bit14 of `warp_esr_report_mask` (0x419e44), both **NON-essential robustness tweaks**. They FECS-error → channel reset → cascade of Timeouts. **Fix:** patch `nvk_mme_set_priv_reg` to consume its 3 inline args and skip `mme_set_priv_reg` (this Mesa tree is Switch-only). Verify the patch is active: the init pushbuf SHRINKS (e.g. `0x1d0c→0x1cd0`) and `ERRNOTIF type=31` disappears. **This is THE Maxwell-on-Horizon bring-up wall.**
+
+5. **Read the WHOLE log, EVERY run — no slicing** (standing rule [[feedback-nvk-read-full-log]]). Grep-slicing the log HID a `vkCreateDevice → 0` success for multiple versions. The last-reached stage + the full tail are the signal.
+
+6. **Verify WHICH binary actually ran.** Stamp a `[BUILD vN <tag>]` line in the log header AND bump the nacp version (`nacptool --create … "0.NN.0-tag"`) — it shows in Sphaira. Upload to the **FAVORITED launch path `sdmc:/switch/`**, NOT sdmc root (uploading to root while launching `/switch/` = running a STALE binary for many versions, a real time-sink here).
+
+7. **Eden ≠ real Tegra for GPU work.** Eden FAKES the GPFIFO submit (accepts it, does NOT execute the arbitrary Maxwell stream — it's built for nvn/deko via translation). So Eden validates the **CPU/code path + enumeration + no-regression** (fast, headless, no Switch), but **cannot reproduce** GPU faults, channel Timeout, or the actual fill. **GPU VA / submit / execution only validate on real Tegra.**
+
+8. **`nxlink -s` netloader is FLAKY** — killing the job wedges the Switch netloader (`Connection failed` on re-arm). **Use FTP:** `curl -T nvk_smoke.nro ftp://<ip>:5000/sdmc:/switch/`, launch from Sphaira "boot as application", poll `ftp://<ip>:5000/sdmc:/nvk_smoke.log`. The smoke exits cleanly so FTP returns; if it hangs, HOME → close → reopen Sphaira to flush the log.
+
+9. **Docker bind-mount mtimes make ninja SKIP edited Mesa files.** After patching a Mesa source, DELETE the `.o` to force recompile, and verify `libnvk.a` + the `.o` timestamps are fresh (post-edit) and the `.nro`/`.elf` relinked. (`libnvk.a` is a THIN archive — `strings` won't show code; `nm` follows it.) The ICD `.so` link failing (crt0/main/`__eh_frame`) is a HARMLESS dead-end — we link the `.a`s into a Switch EXE/NRO ourselves; `libnvk.a` is built BEFORE that `.so` step.
+
+11. **`nvGpuChannelIncrFence` alone does NOT increment the GPU syncpt — you MUST append the builtin fence cmdlist.** IncrFence only bumps libnx's expected fence counter; the syncpt is only incremented when the prebuilt fence cmdlist (a GPFIFO entry: `nvGpuChannelAppendEntry(cmdbuf_va, fence_num_cmds, NOT_MAIN|NO_PREFETCH)`) actually RUNS on the GPU. Mirror `libdrm_nouveau/pushbuf.c:226` exactly: append work → IncrFence → **append fence cmdlist** → kickoff → GetFence. **Why:** without the cmdlist, the completion fence is never reached (drain Timeouts); a self-incrementing pushbuf (like NVK's 3D init) MASKS this, but a non-self-incrementing one (a fill/copy) exposes it (syncpt frozen). **Bonus:** the fence cmdlist's 3rd dword `syncpt_id | (1<<20) | (1<<16)` carries **bit16 = GPU L2 flush** — so this one cmdlist fixes BOTH completion AND CPU/GPU coherency (the CPU readback sees the GPU's write without any non-cacheable mapping). This was THE fix that made the M2 smoke test PASS on real Tegra (v32). **How to apply:** if a submit's fence never signals (Timeout) but the kickoff returned 0, check you're appending the syncpt-increment cmdlist, not just calling IncrFence.
+
+12. **Don't build a custom GPU channel.** deko3d uses libnx `nvGpuChannelCreate` (same as us) + IncrFence + NOT_MAIN/NO_PREFETCH and submits many times fine. The init-submit fixes that actually work: force `GPFIFO_ENTRY_NOT_MAIN|NO_PREFETCH` per push, skip-empty-EXEC, standard IncrFence, a `SetObject` engine-bind prefix. **Meta:** when a fix's rationale is size/count-independent but the symptom tracks submit SIZE or channel STATE, the rationale is probably wrong — re-derive from the decoded error + the error notifier, not from a guessed resource model.
