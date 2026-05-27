@@ -1,12 +1,13 @@
 # PLAN_NVK.md — Port Mesa NVK (Vulkan) to the Switch GM20B + libnx nv services
 
 > **⚠️ READ `RESUME_NVK.md` FIRST — it is the live state.** This file is the original plan; below it
-> is now PARTLY HISTORY. Done since: **M0 (Rust std) ✅** and **M1-build (NVK fully cross-compiles,
-> `libnvk.a` produced) ✅**. The exact remaining winsys/shim symbols are in `UNDEFINED_SYMBOLS.txt`.
-> **GOAL NARROWED**: the deliverable is ONLY a standalone Vulkan placeholder (M3 triangle), like
-> Dan's — **NO game/Aurora/port integration (M4 is OUT of scope)**. See [[dan-nvk-intel-and-goal]].
+> is now MOSTLY HISTORY. Done: **M0 (Rust std) ✅**, **M1-build ✅**, **M1-winsys (links into NRO) ✅**,
+> **M2 (memory + submission + execution) ✅ PROVEN ON REAL TEGRA 2026-05-27** — the headless smoke
+> PASSED: vkCmdFillBuffer(0xCAFEBABE) → submit → waitidle → CPU readback == 0xCAFEBABE on GM20B.
+> **ACTIVE = M3 (the triangle + WSI/present).** **GOAL NARROWED**: the deliverable is ONLY a standalone
+> Vulkan placeholder (M3 triangle), like Dan's — **NO game/Aurora/port integration (M4 OUT)**.
 
-**Status:** M0 + M1-build DONE (2026-05-25). Goal: a working open-source **Vulkan driver for Switch
+**Status:** M0 + M1 + M2 DONE; M2 smoke PASSED on real Tegra (2026-05-27, v32). Goal: a working open-source **Vulkan driver for Switch
 homebrew** (HOS/Atmosphère `.nro`), by porting Mesa's **NVK** to the Tegra X1 **GM20B** over **libnx
 nv services** — NO deko3d, NO NVIDIA L4T blob, NO dependence on Dan's private `ticohq/switch-nvk-vulkan`.
 End state (narrowed): a standalone `.nro` that **requires Vulkan and draws a triangle** via our own NVK.
@@ -40,8 +41,8 @@ guts we replace. NAK/NIL/compiler/`vulkan/` (NVK core) stay upstream-as-is.
 ## Phased milestones
 - **M0 — Mesa/NVK cross-builds for Switch.** meson cross-file → devkitA64 (aarch64-none-elf, newlib). Reconstruct Dan's `create-nvk-image.sh`. Expect to fight: Mesa's Linux/glibc/POSIX assumptions, the DRM/libdrm deps (we cut them), build only `nouveau` Vulkan + NAK. Install prefix `/opt/nvk-switch`. **This is the foundation + likely the fiddliest part.**
 - **M1 — winsys over nv + GM20B enum.** Reimplement device/bo/context (3 files) over libnx nv; fill `nv_device_info` for GM20B. Milestone: `vkCreateInstance` + `vkEnumeratePhysicalDevices` returns the GM20B on real HW (no render yet — prove the layer below, anti-pattern #4).
-- **M2 — memory + submission.** nvmap BOs + GPU VA bind (address_space) + channel/pushbuf submit (gpu_channel) + NvFence sync. Milestone: a trivial `vkQueueSubmit` completes without fault.
-- **M3 — first triangle (THE GOAL).** WSI (ref Dan's public TriangleTest) + render pass/pipeline. Milestone: our NVK draws a triangle on the TV from a standalone `.nro`. **STOP HERE.**
+- **M2 — memory + submission. ✅ DONE + PROVEN ON REAL TEGRA (2026-05-27, v32).** nvmap BOs + GPU VA bind + channel/pushbuf submit + NvFence sync ALL working. Far past "trivial submit": the full headless smoke PASSED — `vkCmdFillBuffer(0xCAFEBABE)` executes on GM20B + CPU reads it back correct. THE FIX was appending the builtin fence cmdlist after IncrFence (the GPU syncpt-increment + L2-flush; mirrors `libdrm_nouveau/pushbuf.c:226`). See RESUME_NVK.md.
+- **M3 — first triangle (THE GOAL). ← ACTIVE.** WSI (ref Dan's public TriangleTest, `dantiicu/vulkan-triangle-test-switch`) + render pass/pipeline. Milestone: our NVK draws a triangle on the TV from a standalone `.nro`. **STOP HERE.** (Likely-needed: the flush cmdlist + NO_PREFETCH NOP barrier after kickoff for inter-submit cache coherency, `pushbuf.c:255-264`.)
 - ~~**M4 — Aurora integration.**~~ **OUT OF SCOPE** (user, 2026-05-25: "nada de jogo nem Port"). Do not wire NVK into Aurora/Dusklight/any game; the deliverable ends at the M3 placeholder.
 
 ## Open risks

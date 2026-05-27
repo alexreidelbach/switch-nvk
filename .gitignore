@@ -11,6 +11,10 @@ native-prefix/
 native-tools/
 sysroot/
 crossfiles/
+nvk_smoke.nro
+winsys/logs/
+winsys/*.nro
+winsys/*.txt
 
 # Logs.
 *.log

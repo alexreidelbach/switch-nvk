@@ -1,26 +1,52 @@
---- a/src/util/u_endian.h	2026-05-26 02:51:48.294643300 +0000
-+++ b/src/util/u_endian.h
-@@ -89,6 +89,19 @@
- 
+diff --git a/src/c11/impl/threads_posix.c b/src/c11/impl/threads_posix.c
+index 3b86924..f98ad96 100644
+--- a/src/c11/impl/threads_posix.c
++++ b/src/c11/impl/threads_posix.c
+@@ -19,7 +19,8 @@ Configuration macro:
+     Use pthread_mutex_timedlock() for `mtx_timedlock()'
+     Otherwise use mtx_trylock() + *busy loop* emulation.
+ */
+-#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__)
++/* libnx's pthread has no pthread_mutex_timedlock(); fall back to the trylock+busy-loop emulation. */
++#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__) && !defined(__SWITCH__)
+ #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
  #endif
  
-+/* Switch port: newlib/horizon has no usable <endian.h> __BYTE_ORDER, and the platform
-+ * isn't matched above. Fall back to the GCC/Clang built-in byte-order macros, which are
-+ * always defined regardless of libc headers. */
-+#if !defined(UTIL_ARCH_LITTLE_ENDIAN) && !defined(UTIL_ARCH_BIG_ENDIAN) && defined(__BYTE_ORDER__)
-+# if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-+#  define UTIL_ARCH_LITTLE_ENDIAN 1
-+#  define UTIL_ARCH_BIG_ENDIAN 0
-+# elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-+#  define UTIL_ARCH_LITTLE_ENDIAN 0
-+#  define UTIL_ARCH_BIG_ENDIAN 1
-+# endif
+diff --git a/src/nouveau/vulkan/nvk_instance.c b/src/nouveau/vulkan/nvk_instance.c
+index edaba41..efba7a5 100644
+--- a/src/nouveau/vulkan/nvk_instance.c
++++ b/src/nouveau/vulkan/nvk_instance.c
+@@ -168,6 +168,8 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+       nvk_create_drm_physical_device;
+    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
+ 
++   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
++#ifdef HAVE_DL_ITERATE_PHDR
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(nvk_CreateInstance);
+    if (!note) {
+@@ -183,8 +185,17 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+       goto fail_init;
+    }
+ 
+-   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
+    memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
++#else
++   /* Horizon/Switch has no dl_iterate_phdr / ELF build-id note; derive a stable driver SHA
++    * from the package version so the pipeline-cache UUID is deterministic across runs. */
++   {
++      struct mesa_sha1 sha1_ctx;
++      _mesa_sha1_init(&sha1_ctx);
++      _mesa_sha1_update(&sha1_ctx, PACKAGE_VERSION, sizeof(PACKAGE_VERSION) - 1);
++      _mesa_sha1_final(&sha1_ctx, instance->driver_build_sha);
++   }
 +#endif
-+
- #if !defined(UTIL_ARCH_LITTLE_ENDIAN) || !defined(UTIL_ARCH_BIG_ENDIAN)
- # error "UTIL_ARCH_LITTLE_ENDIAN and/or UTIL_ARCH_BIG_ENDIAN were unset."
- #elif UTIL_ARCH_LITTLE_ENDIAN == UTIL_ARCH_BIG_ENDIAN
---- a/src/util/detect_os.h	2026-05-26 02:51:49.632931700 +0000
+ 
+ #if DETECT_OS_ANDROID
+    struct u_gralloc *u_gralloc = vk_android_init_ugralloc();
+diff --git a/src/util/detect_os.h b/src/util/detect_os.h
+index 86286df..4998c34 100644
+--- a/src/util/detect_os.h
 +++ b/src/util/detect_os.h
 @@ -91,6 +91,14 @@
  #define DETECT_OS_POSIX 1
@@ -46,19 +72,26 @@
 +#endif
  
  #endif /* DETECT_OS_H */
---- a/src/c11/impl/threads_posix.c	2026-05-26 02:51:50.586461800 +0000
-+++ b/src/c11/impl/threads_posix.c
-@@ -19,7 +19,8 @@
-     Use pthread_mutex_timedlock() for `mtx_timedlock()'
-     Otherwise use mtx_trylock() + *busy loop* emulation.
- */
--#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__)
-+/* libnx's pthread has no pthread_mutex_timedlock(); fall back to the trylock+busy-loop emulation. */
-+#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__) && !defined(__SWITCH__)
- #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
- #endif
+diff --git a/src/util/libdrm.h b/src/util/libdrm.h
+index 4bfe1d2..e6f621e 100644
+--- a/src/util/libdrm.h
++++ b/src/util/libdrm.h
+@@ -27,7 +27,11 @@
+  * the proliferation of #ifdef'ery to support environments without libdrm.
+  */
  
---- a/src/util/os_misc.c	2026-05-26 02:51:52.018194800 +0000
+-#ifdef HAVE_LIBDRM
++/* switch-nvk: on Horizon there's no system libdrm, but our winsys shim
++ * (winsys/drm_shim.c) provides the real libdrm core entry points over libnx nv.
++ * Use the real <xf86drm.h> so callers link to those instead of these no-op
++ * stubs (which return -ENOENT and make device enumeration find nothing). */
++#if defined(HAVE_LIBDRM) || defined(__SWITCH__)
+ #include <xf86drm.h>
+ #else
+ 
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index 4b79166..67af0b5 100644
+--- a/src/util/os_misc.c
 +++ b/src/util/os_misc.c
 @@ -57,7 +57,7 @@
  #  include <unistd.h>
@@ -69,7 +102,7 @@
  #  include <unistd.h>
  #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
  #  include <sys/resource.h>
-@@ -332,6 +332,11 @@
+@@ -332,6 +332,11 @@ os_get_total_physical_memory(uint64_t *size)
  #elif DETECT_OS_FUCHSIA
     *size = zx_system_get_physmem();
     return true;
@@ -81,39 +114,53 @@
  #else
  #error unexpected platform in os_misc.c
     return false;
---- a/src/nouveau/vulkan/nvk_instance.c	2026-05-26 02:51:53.055932800 +0000
-+++ b/src/nouveau/vulkan/nvk_instance.c
-@@ -168,6 +168,8 @@
-       nvk_create_drm_physical_device;
-    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
+diff --git a/src/util/u_endian.h b/src/util/u_endian.h
+index b01f730..6087c3e 100644
+--- a/src/util/u_endian.h
++++ b/src/util/u_endian.h
+@@ -89,6 +89,19 @@
  
-+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
-+#ifdef HAVE_DL_ITERATE_PHDR
-    const struct build_id_note *note =
-       build_id_find_nhdr_for_addr(nvk_CreateInstance);
-    if (!note) {
-@@ -183,8 +185,17 @@
-       goto fail_init;
-    }
+ #endif
  
--   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
-    memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
-+#else
-+   /* Horizon/Switch has no dl_iterate_phdr / ELF build-id note; derive a stable driver SHA
-+    * from the package version so the pipeline-cache UUID is deterministic across runs. */
-+   {
-+      struct mesa_sha1 sha1_ctx;
-+      _mesa_sha1_init(&sha1_ctx);
-+      _mesa_sha1_update(&sha1_ctx, PACKAGE_VERSION, sizeof(PACKAGE_VERSION) - 1);
-+      _mesa_sha1_final(&sha1_ctx, instance->driver_build_sha);
-+   }
++/* Switch port: newlib/horizon has no usable <endian.h> __BYTE_ORDER, and the platform
++ * isn't matched above. Fall back to the GCC/Clang built-in byte-order macros, which are
++ * always defined regardless of libc headers. */
++#if !defined(UTIL_ARCH_LITTLE_ENDIAN) && !defined(UTIL_ARCH_BIG_ENDIAN) && defined(__BYTE_ORDER__)
++# if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#  define UTIL_ARCH_LITTLE_ENDIAN 1
++#  define UTIL_ARCH_BIG_ENDIAN 0
++# elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#  define UTIL_ARCH_LITTLE_ENDIAN 0
++#  define UTIL_ARCH_BIG_ENDIAN 1
++# endif
 +#endif
++
+ #if !defined(UTIL_ARCH_LITTLE_ENDIAN) || !defined(UTIL_ARCH_BIG_ENDIAN)
+ # error "UTIL_ARCH_LITTLE_ENDIAN and/or UTIL_ARCH_BIG_ENDIAN were unset."
+ #elif UTIL_ARCH_LITTLE_ENDIAN == UTIL_ARCH_BIG_ENDIAN
+diff --git a/src/vulkan/runtime/meson.build b/src/vulkan/runtime/meson.build
+index 9d34ae4..4908404 100644
+--- a/src/vulkan/runtime/meson.build
++++ b/src/vulkan/runtime/meson.build
+@@ -57,6 +57,13 @@ vulkan_lite_runtime_deps = [
+ if dep_libdrm.found()
+   vulkan_lite_runtime_files += files('vk_drm_syncobj.c')
+   vulkan_lite_runtime_deps += dep_libdrm
++elif host_machine.system() == 'horizon'
++  # Switch (switch-nvk): there is no system libdrm, but our winsys shim
++  # (winsys/drm_shim.c) supplies the libdrm *core* symbols this file needs
++  # (drmSyncobj*, drmGetCap) over libnx nv. Compile it so the drm-syncobj
++  # vk_sync_type is available (vk_drm_syncobj_get_type/_finish) without
++  # pulling in the rest of the HAVE_LIBDRM code paths.
++  vulkan_lite_runtime_files += files('vk_drm_syncobj.c')
+ endif
  
- #if DETECT_OS_ANDROID
-    struct u_gralloc *u_gralloc = vk_android_init_ugralloc();
---- a/src/vulkan/runtime/vk_image.h	2026-05-26 02:51:54.208722000 +0000
+ if with_platform_android
+diff --git a/src/vulkan/runtime/vk_image.h b/src/vulkan/runtime/vk_image.h
+index 71dadab..03adbbc 100644
+--- a/src/vulkan/runtime/vk_image.h
 +++ b/src/vulkan/runtime/vk_image.h
-@@ -75,7 +75,7 @@
+@@ -75,7 +75,7 @@ struct vk_image {
     /* wsi_image_create_info::scanout */
     bool wsi_legacy_scanout;
  
