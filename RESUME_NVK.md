@@ -8,6 +8,32 @@ Last updated: 2026-05-27.
 
 ---
 
+## 🎉🎉 M3 TRIANGLE PASSED ON REAL TEGRA (2026-05-27, t1b) — NVK draws geometry + shows it on the TV
+
+**`M3 STEP 1b PASSED — NVK rasterised a TRIANGLE on Tegra`** + a YELLOW TRIANGLE shown on the TV.
+Our own NVK Vulkan driver, on the GM20B: `vkCreateDevice=0 → image+view+renderpass+framebuffer →
+vkCreateShaderModule(vert+frag) → vkCreateGraphicsPipelines=0 → render pass (clear black) + vkCmdDraw(3)
+→ copy image→buffer → readback: yellow=722 black=3374 other=0, center=0xff00ffff → present on screen`.
+
+This proves the LAST unknowns of the graphics path on hardware: **NAK-compiled vertex+fragment shaders
+EXECUTE on the GM20B**, the graphics pipeline + render pass + rasterisation work, and the result is
+**displayed on the TV** (via a libnx framebuffer blit of the rendered image — present path proven earlier
+with a blue clear). This is the classic "Vulkan triangle" milestone = Dan's first-artifact goal, on our
+own from-scratch winsys. **M3 essentially achieved.**
+
+- **App:** `winsys/smoke/nvk_tri.c` (build `APP=nvk_tri`). Shaders: `winsys/smoke/shaders/triangle.{vert,frag}`
+  → `gen-shaders.sh` (glslangValidator, added to the Docker image) → embedded `tri_shaders.h`.
+- **Present:** `present_shot()` — upscales the rendered 64×64 image to 1280×720 via the libnx framebuffer,
+  shown until `+`. (Done AFTER Vulkan teardown to avoid GPU/display contention. NOT Vulkan WSI yet.)
+- **Steps proven:** 1a = clear an image to a colour + readback + present (blue on TV); 1b = draw a real
+  triangle (shaders) + present (yellow triangle on TV). Both headless-verifiable + on-screen.
+- **NEXT (stretch / the "art placeholder"):** render a TEXTURED quad of the **Vulkan "Industry Forged"
+  logo** — adds a sampled texture (upload via staging+copy, already proven) + sampler + descriptor set +
+  a textured fragment shader. One standard increment above the triangle. (Optional polish: real Vulkan
+  WSI swapchain over `nwindow` instead of the framebuffer blit — ref `dantiicu/vulkan-triangle-test-switch`.)
+
+---
+
 ## 🎉 M2 SMOKE TEST PASSED ON REAL TEGRA (2026-05-27, v32) — the winsys is PROVEN
 
 **`I VERIFY OK: all 1024 words == 0xcafebabe` / `SMOKE TEST PASSED — NVK rendered to memory on Tegra`.**

@@ -11,10 +11,11 @@ native-prefix/
 native-tools/
 sysroot/
 crossfiles/
-nvk_smoke.nro
+/*.nro
 winsys/logs/
 winsys/*.nro
 winsys/*.txt
+winsys/smoke/shaders/*.spv
 
 # Logs.
 *.log

@@ -57,3 +57,7 @@ RUN XDIR=/opt/devkitpro/portlibs/switch/lib/pkgconfig; mkdir -p "$XDIR"; \
       if [ -n "$f" ]; then cp "$f" "$XDIR/"; echo "baked $f"; fi; \
     done; \
     /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar rcs /opt/devkitpro/portlibs/switch/lib/libdl.a
+
+# glslang (glslangValidator) to compile the M3 triangle's GLSL shaders -> SPIR-V.
+RUN apt-get update && apt-get install -y --no-install-recommends glslang-tools \
+    && rm -rf /var/lib/apt/lists/* && glslangValidator --version
