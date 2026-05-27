@@ -11,6 +11,17 @@ Last updated: 2026-05-27.
 ## ⭐ ROADMAP PROGRESS (2026-05-27 cont) — Tier 1.1 INDEXED DRAW ✅ on real Tegra
 
 Started the [`ROADMAP.md`](ROADMAP.md) march toward ports-ready (→ Dawn-over-Vulkan).
+- **Textures: mipmaps + sRGB + BC1 ✅ (`nvk_textures.c`, ver 0.53.0-textures)** — five textured quads
+  sampling three textures that exercise NIL's format/mip layout paths: (1) a 64×64 R8G8B8A8_UNORM texture
+  with **3 mip levels** (L0=red, L1=green, L2=blue) sampled at EXPLICIT LODs 0/1/2 via `textureLod` (LOD in
+  a push constant) → proves per-level mip layout; (2) an **R8G8B8A8_SRGB** solid grey 188 → the texture
+  unit decodes sRGB→linear so it reads back exactly **0x80=128** (not 188) → proves the sRGB format path;
+  (3) a **BC1_RGB_UNORM_BLOCK** solid-yellow block → decompresses to yellow → proves block-compressed
+  formats. New shaders `tex.{vert,frag}` (push-constant rect+LOD, `textureLod`) added to gen-shaders.sh →
+  `tri_shaders.h` (`tex_vert/frag_spv`, additive). On real Tegra: `mip LOD0=0x0000ff (red) LOD1=0x00ff00
+  (green) LOD2=0xff0000 (blue), sRGB=0x808080 (=128, not 188), BC1=0x00ffff (yellow)`, `mips=1 srgb=1
+  bc1=1` → `TEXTURES PASSED`. **Tier 1.3 done.**
+  Build: `APP=nvk_textures TITLE="NVK Textures" VERSION="0.53.0-textures" bash winsys/build-nro.sh`.
 - **Many draws + alpha blending ✅ (`nvk_multi.c`, ver 0.52.0-multi)** — the RGB "venn": an opaque dark
   background quad (opaque pipeline, blend OFF) + 3 translucent quads R/G/B at alpha 0.5 (blend pipeline,
   `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA`) overlapping in the centre. ONE render pass exercises **4 draws**, a
