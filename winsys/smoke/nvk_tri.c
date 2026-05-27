@@ -392,7 +392,14 @@ done:
       LOG("cleanup: vkDestroyInstance done");
    }
    if (have_shot) present_shot();
-   LOG("=== done; log at sdmc:/nvk_tri.log ===");
-   if (g_log) fclose(g_log);
+   LOG("=== done; returning to Sphaira ===");
+   /* Clean shutdown so pressing + returns to Sphaira WITHOUT a crash:
+    * (1) detach the shim log sink + NULL g_log BEFORE closing it, so any late
+    *     shim/NVK logging during process-exit teardown can't use-after-free the
+    *     FILE (that dangling g_log was the "software closed" crash on exit);
+    * (2) consoleInit/socket weren't used on a Sphaira launch, so nothing else to
+    *     tear down — returning from main hands control back to the launcher. */
+   g_drm_shim_log_sink = NULL;
+   if (g_log) { fclose(g_log); g_log = NULL; }
    return 0;
 }

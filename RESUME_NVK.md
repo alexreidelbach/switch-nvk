@@ -8,6 +8,20 @@ Last updated: 2026-05-27.
 
 ---
 
+## ⭐ M3 PROGRESS (2026-05-27 cont) — present, textures, 3D, real-time, Sascha shaders
+
+On real Tegra, all shown on the TV via a libnx-framebuffer blit of NVK-rendered images:
+- **Present path proven** — a blue clear shown on the TV (`nvk_tri.c` step 1a). Then the yellow triangle (1b, below).
+- **Textures proven** (`nvk_logo.c`) — CPU-generated "VULKAN" logo uploaded (staging → `vkCmdCopyBufferToImage`) + sampler + descriptor set + textured quad → shown on screen.
+- **3D + UBO + vertex buffer proven** (`nvk_scene.c`) — a textured CUBE (logo on faces): vertex buffer, MVP matrix in a UBO, descriptor set, backface culling.
+- **Real-time @ 60 fps proven** — the cube SPINS smoothly at vsync 60 fps (per-frame MVP + re-submit + blit). KEY: `DRM_SHIM_DEBUG` per-frame SD-card logging was throttling it to ~10 fps with stutter (bursty SD writes) — building WITHOUT it = smooth 60.
+- **POC: Sascha Willems' ACTUAL shaders run on our driver** (`nvk_poc.c`) — the verbatim `triangle.vert/.frag` from `SaschaWillems/Vulkan` (MIT) compiled by our NAK + rendered → the canonical RGB Vulkan triangle, on our driver. (Established PC Vulkan code working = proof.)
+- **DEPTH is the open fix-once** — adding a depth attachment GR-errors on `CLEAR_SURFACE`(Z) because our winsys maps every BO `kind=0` (linear) but the Maxwell ZETA depth surface needs its proper Z block-linear KIND (NVK/NIL computes it, our `drm_shim` zeroes it). Fix = honor the depth image's kind in VM_BIND. Disabled for now (convex cube works via backface culling). **This blocks any 3D content with a depth buffer — i.e. essentially every 3D game/port — so it's the next foundational fix.**
+- **Exit on framebuffer apps** is finicky (recursive User Break in the libnx/display teardown vs NVK's nv); for the POC it's irrelevant (photograph the held frame). `svcExitProcess` workaround partial.
+- Shaders: `winsys/smoke/shaders/*.{vert,frag}` → `gen-shaders.sh` (glslangValidator, in the image) → embedded `tri_shaders.h`. `build-nro.sh` now takes `APP`/`TITLE`/`VERSION`.
+
+---
+
 ## 🎉🎉 M3 TRIANGLE PASSED ON REAL TEGRA (2026-05-27, t1b) — NVK draws geometry + shows it on the TV
 
 **`M3 STEP 1b PASSED — NVK rasterised a TRIANGLE on Tegra`** + a YELLOW TRIANGLE shown on the TV.

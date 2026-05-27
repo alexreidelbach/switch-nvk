@@ -61,3 +61,9 @@ RUN XDIR=/opt/devkitpro/portlibs/switch/lib/pkgconfig; mkdir -p "$XDIR"; \
 # glslang (glslangValidator) to compile the M3 triangle's GLSL shaders -> SPIR-V.
 RUN apt-get update && apt-get install -y --no-install-recommends glslang-tools \
     && rm -rf /var/lib/apt/lists/* && glslangValidator --version
+
+# Pillow + a TTF font, to rasterise the credits/logo text into an RGBA texture at
+# build time (gen-logo-image.py -> embedded logo_image.h). DejaVu is a free font.
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages --no-cache-dir pillow
