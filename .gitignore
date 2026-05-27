@@ -20,4 +20,10 @@ winsys/smoke/shaders/*.spv
 # Logs.
 *.log
 
+# RE of Dan's PUBLIC release binary — keep dan-re/*.md notes, ignore the binary + Ghidra/JDK + scratch.
+dan-re/*.nro
+dan-re/tools/
+dan-re/ghidra_proj/
+dan-re/_*.txt
+
 # Keep: Dockerfile, *.sh, *.json, *.md, compat/, patches/, pristine-25.0.7/, UNDEFINED_SYMBOLS.txt
