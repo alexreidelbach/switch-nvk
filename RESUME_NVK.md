@@ -8,6 +8,28 @@ Last updated: 2026-05-27.
 
 ---
 
+## ⭐ ROADMAP PROGRESS (2026-05-27 cont) — Tier 1.1 INDEXED DRAW ✅ on real Tegra
+
+Started the [`ROADMAP.md`](ROADMAP.md) march toward ports-ready (→ Dawn-over-Vulkan).
+- **Indexed draw ✅ (`nvk_indexed.c`, ver 0.51.0-indexed)** — the same textured cube as `nvk_scene`
+  but stored the way real meshes are: **24 UNIQUE verts + a 36-index buffer**, drawn via
+  `vkCmdBindIndexBuffer` + `vkCmdDrawIndexed`. Records TWO command buffers (one binds a UINT16 index
+  buffer, one UINT32), submits each headless and verifies the readback, then spins on the TV with UINT16.
+  On real Tegra: `L UINT16: red=20069 white=364 center=0xff1e14c8 => OK` and `L UINT32: …same… => OK`
+  (identical counts ⇒ the index-fetch produced the same geometry for both types), `INDEXED DRAW PASSED`,
+  cube spinning ~38 fps. **Tier 1.1 done — every imported mesh is indexed, so real geometry is unblocked.**
+  - Build: `docker run --rm -v "D:\switch-nvk:/work" -w /work switch-nvk-build bash -lc 'APP=nvk_indexed TITLE="NVK Indexed" VERSION="0.51.0-indexed" bash winsys/build-nro.sh'`.
+  - The readback verify is NON-FATAL (a zero readback only logs FAIL + continues) so the TV always shows
+    the spin; only a submit error aborts. Reused the `scene` shaders (`scene_vert_spv`/`scene_frag_spv`).
+- **Eden caveat (re-confirmed):** Eden runs the whole CPU/Vulkan path (A→pipeline→record→submit returns)
+  but FAKES the GPU → readback all zeros (the proven `nvk_scene` reads zero on Eden too). Use Eden only as
+  a code-path/crash smoke; **pixel proof = real Tegra** (FTP the `.nro` to `sdmc:/switch/`, Sphaira
+  boot-as-app, read `sdmc:/<app>.log`).
+- **NEXT on the roadmap = `nvk_multi`** (several objects in one render pass + pipeline/descriptor switches
+  + **alpha blending**), then `nvk_swapchain` (real WSI — the highest-value single step).
+
+---
+
 ## ⭐ M3 PROGRESS (2026-05-27 cont) — present, textures, 3D, real-time, Sascha shaders
 
 On real Tegra, all shown on the TV via a libnx-framebuffer blit of NVK-rendered images:

@@ -21,6 +21,7 @@ ends with a photo/log proof, just like the ones we already have.
 | 3D cube + **depth** @ vsync | `nvk_scene` | VBO, MVP UBO, **ZETA depth buffer (the universal 3D blocker)** |
 | Sascha Willems triangle | `nvk_poc` | an established PC Vulkan program's verbatim shaders run unmodified |
 | **Cubemap skybox** | `nvk_cubemap` | 6-layer `CUBE_COMPATIBLE` image, `TYPE_CUBE` view, **`samplerCube`** |
+| **Indexed draw (16+32)** | `nvk_indexed` | `vkCmdBindIndexBuffer` + `vkCmdDrawIndexed`, UINT16 **and** UINT32 (Tier 1.1 ✅) |
 
 That covers: instance/device/queue, NAK vertex+fragment shaders, graphics pipelines,
 render passes, vertex/uniform buffers, 2D + cube textures, depth, and a real-time loop.
@@ -32,9 +33,10 @@ render passes, vertex/uniform buffers, 2D + cube textures, depth, and a real-tim
 ### Tier 1 — Core rendering correctness (small apps, fast)
 The primitives every real mesh/scene uses but we haven't exercised yet.
 
-1. **Indexed draw** — `nvk_indexed`: `vkCmdDrawIndexed` + an index buffer (16- and
-   32-bit). *Why:* essentially every imported mesh is indexed; without this we can't
-   draw real geometry.
+1. ~~**Indexed draw** — `nvk_indexed`: `vkCmdDrawIndexed` + an index buffer (16- and
+   32-bit).~~ **✅ DONE (2026-05-27)** — indexed cube (24 unique verts + 36-index buffer),
+   both UINT16 and UINT32 verified on real Tegra (`L UINT16/UINT32: red=20069 white=364 => OK`,
+   identical counts) + spins on the TV. *Every imported mesh is indexed; real geometry unblocked.*
 2. **Many draws + blending** — `nvk_multi`: several objects in one render pass with
    pipeline/descriptor-set switches and **alpha blending** enabled. *Why:* real
    frames are dozens-to-thousands of draws; transparency is needed for UI/particles.
@@ -82,7 +84,7 @@ geometry/tessellation = nice-to-have, add only when a specific port asks for the
 
 ## Suggested order
 
-`nvk_indexed` → `nvk_multi` → `nvk_swapchain` (the big one) → `nvk_textures` →
+~~`nvk_indexed`~~ ✅ → **`nvk_multi` (NEXT)** → `nvk_swapchain` (the big one) → `nvk_textures` →
 `nvk_rtt` → `nvk_compute` → **Dawn-Vulkan bring-up**.
 
 Rationale: indexed + many-draws unblock real geometry immediately; the swapchain is the
