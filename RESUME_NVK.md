@@ -8,6 +8,33 @@ Last updated: 2026-05-27.
 
 ---
 
+## ▶ NOW: DAWN-OVER-VULKAN BRING-UP (the bridge to Dusklight) — see [`PLAN_DAWN_VULKAN.md`](PLAN_DAWN_VULKAN.md)
+
+GOAL (user, 2026-05-27): integrate our NVK as Dusklight's graphics backend via Dawn's Vulkan backend.
+Path `Dusklight → Aurora GX → lib/webgpu/gpu.cpp → Dawn(Vulkan) → our NVK`. WSI zero-copy = TODO post-port.
+
+**KEY DE-RISK (verified by reading Dan's vendored `dawn-switch`): the bridge is SHAPE-COMPATIBLE with our
+NVK** — Dawn bootstraps via `vk_icdGetInstanceProcAddr` (we export it); surface = `SurfaceSourceSwitchNWindow`
+→ `vkCreateViSurfaceNN` (our WSI impls it, `nvk_instance` advertises `NN_vi_surface`); Aurora's cmake
+already has the Switch+Vulkan path (just redirect `DAWN_SWITCH_NVK_LIBRARY` from Dan's private lib to ours).
+
+- **✅ M-DV-0 DONE (2026-05-27, NOT HW-gated): packaged our NVK as a Dawn-consumable install tree.**
+  `bash package-nvk.sh` → **`nvk-switch/{lib/libvulkan.a (70MB), include/vulkan/}`**. The lib = MRI-merge of
+  `libnvk.a` + the 18 support archives + the 3 winsys shim objects (`drm_shim`/`switch_libc_shim`/`compat`),
+  so the consumer link only needs the `--wrap=open,close,stat,lstat` flags (no separate shim/`drm_nouveau`).
+  VALIDATED: `bash _linktest_merged.sh` whole-archives it into a Switch EXE with **ZERO unresolved symbols**
+  (12 MB .elf) — symbol-complete & self-consistent. Exports `vk_icdGetInstanceProcAddr`(T) + `__wrap_*`(T);
+  the `vkCreateViSurfaceNN` entrypoint is present (reached via dispatch, not a public T — normal for an ICD).
+- **⬜ M-DV-1 (NEXT, HW-gated): standalone Dawn-Vulkan CLEAR nro on real Tegra** — write our own
+  `clear_nro.cpp` (Dan's `*_nro.cpp` sources are NOT in the public fork, only the CMake recipe), build
+  dawn-switch with `-DDAWN_SWITCH_BUILD_CLEAR_NRO=ON -DDAWN_SWITCH_NVK_ROOT=D:\switch-nvk\nvk-switch`
+  (adapt the link: drop `drm_nouveau`, add the `--wrap` flags + `expat`). Proves Dawn→our-NVK→our-WSI
+  isolated from Aurora/Dusklight. BIGGEST RISK = does `DAWN_ENABLE_BACKEND_VULKAN` compile for devkitA64.
+- **⬜ M-DV-2/3**: wire into Dusklight (`AURORA_BACKEND_GLES=OFF`, point aurora_core.cmake at our package)
+  → prelaunch HOME menu on NVK → GX gameplay. Full plan + consumer link recipe in PLAN_DAWN_VULKAN.md.
+
+---
+
 ## 🎉🎉 WSI WORKING ON REAL TEGRA (2026-05-27) — our own VK_NN_vi_surface swapchain presents to the TV
 
 **A real `VkSwapchain` over libnx `nwindow`, written from scratch from the Ghidra RE of Dan's

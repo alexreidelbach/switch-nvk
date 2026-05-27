@@ -7,11 +7,13 @@ libc-switch/
 
 # Build outputs / generated.
 mb/
+nvk-switch/
 native-prefix/
 native-tools/
 sysroot/
 crossfiles/
 /*.nro
+/_*.sh
 winsys/logs/
 winsys/*.nro
 winsys/*.txt
