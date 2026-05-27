@@ -8,6 +8,35 @@ Last updated: 2026-05-27.
 
 ---
 
+## ⭐⭐ SWAPCHAIN / WSI (2026-05-27 cont) — headless dead-end → pivot to VI/nwindow (Dan's path). See [`PLAN_WSI_NWINDOW.md`](PLAN_WSI_NWINDOW.md)
+
+Pursuing Tier 2.4 (real swapchain). **First tried `VK_EXT_headless_surface`** (shortcut, always-built
+in Mesa) to avoid writing a real WSI. ENABLED WSI on our build (durable Mesa changes, fold into the
+patch): (1) `nvk_physical_device.h` — `#ifdef __SWITCH__ #define NVK_USE_WSI_PLATFORM` (the headless
+ext is built but `KHR_surface`+the device surface queries were gated on this macro, only set for
+x11/wayland/xcb/display); (2) `nvk_wsi.c` — `#ifdef __SWITCH__` force `supports_modifiers=false` (no
+dma-buf/DRM-modifier on our winsys) + `khr_present_wait=false` (its timeline-semaphore present path our
+winsys can't back). `libvulkan_wsi.a` builds (was `build_by_default:false`) and is folded into `libnvk.a`
+via the `link_whole` dep — so DON'T also `--whole-archive` it in build-nro.sh (double-definition).
+**PROVEN on real Tegra:** `vkCreateHeadlessSurfaceEXT`→0, **`vkCreateSwapchainKHR`→0 (5 images)**,
+`vkGetSwapchainImagesKHR`→5, `vkAcquireNextImageKHR`→0, render submit→0. App: `winsys/smoke/nvk_swapchain.c`.
+
+**❌ headless is a DEAD END** (two reasons): (a) `vkQueuePresentKHR` **NULL-derefs** — crash report +
+addr2line: `vk_common_QueueSubmit + 0xb8144 (Data Abort @0x0) ← wsi_common_queue_present ← main`. The
+headless present submits an internal **blit command buffer** through the generated v1→v2 `vkQueueSubmit`
+conversion, which crashes on our setup (NOT the wait-sem, NOT mem_signal [create_sync_for_memory is NULL
+on NVK so it's skipped], NOT the winsys EXEC drain — ruled out by instrumenting each). (b) Even fixed,
+**headless never scans out** — it is a test surface; pixels were faked via a manual libnx framebuffer blit.
+
+**✅ PIVOT (Dan's exact hint "build a WSI over nwindow"):** implement a real **`VK_NN_vi_surface`** backend
+(`vkCreateViSurfaceNN(window=nwindowGetDefault())` — exactly what Dan's public `vulkan-triangle-test-switch`
+does). Present = `nwindowQueueBuffer` (real zero-copy scanout, no blit submit). **Full design + the
+NvGraphicBuffer↔NIL-layout integration + milestones in [`PLAN_WSI_NWINDOW.md`](PLAN_WSI_NWINDOW.md).**
+Carry-over (not wasted): WSI enabled + swapchain create/acquire/render all work on HW; only the backend
+(headless→vi) + present mechanism change. ⚠️ Temp diagnostics left in the working tree
+(`wsi_common.c`/`wsi_common_headless.c`/`nvk_queue.c` `*_log` via `g_drm_shim_log_sink`) — revert before a
+clean re-extract; they're not in the patch.
+
 ## ⭐ ROADMAP PROGRESS (2026-05-27 cont) — Tier 1.1 INDEXED DRAW ✅ on real Tegra
 
 Started the [`ROADMAP.md`](ROADMAP.md) march toward ports-ready (→ Dawn-over-Vulkan).
