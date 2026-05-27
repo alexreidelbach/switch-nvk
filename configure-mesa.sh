@@ -18,7 +18,7 @@ mkdir -p "$CROSSDIR"
 # assumes glibc defaults. Expose them globally by augmenting the cross-file's c_args/cpp_args.
 # Also wire the compat shim: -I/work/compat (searched before newlib, so our sys/mman.h &
 # sys/sysmacros.h stubs win) + force-include switch_compat.h (HAVE_SECURE_GETENV, alloca, etc.).
-sed -i "s|'-D__SWITCH__',|'-D__SWITCH__','-D_GNU_SOURCE','-D_DEFAULT_SOURCE','-I/work/compat','-I/opt/switch-cross-include','-include','/work/compat/switch_compat.h',|g" "$CROSSDIR/switch.cross"
+sed -i "s|'-D__SWITCH__',|'-D__SWITCH__','-D_GNU_SOURCE','-D_DEFAULT_SOURCE','-DVK_USE_PLATFORM_VI_NN','-I/work/compat','-I/opt/switch-cross-include','-include','/work/compat/switch_compat.h',|g" "$CROSSDIR/switch.cross"
 
 # The aarch64-none-elf (bare-metal) triple doesn't auto-link libc/libm into a `-shared` object, so
 # the Vulkan ICD .so link fails on fprintf/fwrite (NVK's method-dump + nir_print debug code) +

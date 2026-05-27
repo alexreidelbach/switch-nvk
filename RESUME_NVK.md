@@ -8,6 +8,37 @@ Last updated: 2026-05-27.
 
 ---
 
+## 🎉🎉 WSI WORKING ON REAL TEGRA (2026-05-27) — our own VK_NN_vi_surface swapchain presents to the TV
+
+**A real `VkSwapchain` over libnx `nwindow`, written from scratch from the Ghidra RE of Dan's
+`wsi_common_switch.c`, PRESENTS ON THE TV.** On HW (`nvk_vi_swapchain.nro`, ver 0.55.1): cycling colour
+roxo→rosa→verde via `vkCreateViSurfaceNN`→`vkCreateSwapchainKHR`(2 img,FIFO,1280×720)→
+`vkAcquireNextImageKHR`→clear→`vkQueuePresentKHR`→our `wsi_common_switch.c`→nwindow→VI compositor.
+**Our NVK now presents like any Vulkan driver — Step 1 of the Dusklight path DONE.**
+
+### The implementation (Mesa edits — mesa-25/ is GITIGNORED, so REPRODUCE these; backend copy kept at `winsys/wsi/wsi_common_switch.c`):
+- **NEW `src/vulkan/wsi/wsi_common_switch.c`** — the VI backend (template = wsi_common_headless.c):
+  `wsi_CreateViSurfaceNN` ({platform VK_ICD_WSI_PLATFORM_VI=12, window=nwindow}); get_support/caps2
+  (RGBA8/BGRA8, FIFO, 2-4 img, extent from `nwindowGetDimensions`); create_swapchain (WSI_IMAGE_TYPE_CPU
+  host-visible images + libnx `framebufferCreate`+`framebufferMakeLinear` for the nwindow buffers —
+  libnx builds the NvGraphicBuffer + nwindowConfigureBuffer correctly); acquire = round-robin index;
+  **queue_present = WaitForFences(blit) + `armDCacheFlush`(invalidate, GM20B not IO-coherent) + row-copy
+  cpu_map → `framebufferBegin` buffer + `framebufferEnd`** (the cache-invalidate fixed "constant pink").
+- **`src/vulkan/wsi/wsi_common.h`**: `VK_ICD_WSI_PLATFORM_MAX` = VI+1 when `VK_USE_PLATFORM_VI_NN` (the
+  `wsi[]` array was [11]=METAL+1; VI=12 overflowed — real OOB bug).
+- **`src/vulkan/wsi/wsi_common_private.h`**: declare `wsi_switch_init_wsi`/`_finish_wsi` (`#ifdef VK_USE_PLATFORM_VI_NN`).
+- **`src/vulkan/wsi/wsi_common.c`**: call `wsi_switch_init_wsi`/`_finish_wsi` (`#ifdef VK_USE_PLATFORM_VI_NN`).
+- **`src/vulkan/wsi/meson.build`**: compile `wsi_common_switch.c` on `host_machine.system()=='horizon'`.
+- **`src/nouveau/vulkan/nvk_instance.c`**: advertise `.NN_vi_surface = true` (`#ifdef VK_USE_PLATFORM_VI_NN`).
+- **`configure-mesa.sh`** (TRACKED): inject global `-DVK_USE_PLATFORM_VI_NN` into the cross c_args.
+- BUILD: `bash configure-mesa.sh` (full reconfigure once to bake the define) → `ninja -C mb` (full) →
+  `APP=nvk_vi_swapchain bash winsys/build-nro.sh`. The `.so` ICD link fails (no `-lnx` for nwindow*) —
+  IGNORE, it's a dead-end; the `.nro`/EXE links fine. ⚠️ touch the .c before ninja (bind-mount mtime).
+- **NEXT optimization (not blocking):** zero-copy per Dan's exact recipe (swapchain image IS the nwindow
+  buffer, NvGraphicBuffer kind=0xfe, native NvMultiFence→nwindowQueueBuffer) — see `dan-re/RE_NOTES.md`.
+- **THEN: Dawn-over-Vulkan bring-up** (the bridge to Dusklight). ⚠️ temp `*_log` diagnostics still in
+  wsi_common.c/headless.c/nvk_queue.c (revert before clean re-extract).
+
 ## ⭐⭐ SWAPCHAIN / WSI (2026-05-27 cont) — headless dead-end → pivot to VI/nwindow (Dan's path). See [`PLAN_WSI_NWINDOW.md`](PLAN_WSI_NWINDOW.md)
 
 Pursuing Tier 2.4 (real swapchain). **First tried `VK_EXT_headless_surface`** (shortcut, always-built
