@@ -766,11 +766,16 @@ static int vm_bind_op(const struct drm_nouveau_vm_bind_op *op)
    if (!bo)
       return -ENOENT;
 
-   /* Use the BO's REAL PTE kind (captured from GEM_NEW tile_flags) for the
-    * mapping — NOT op->flags&0xff, which is the bind's op-flags, not the kind.
-    * A tiled (block-linear) buffer mapped as Pitch makes the 3D engine read it
-    * wrong -> MMU/FECS fault during the 3D init. Log both to compare. */
-   const NvKind map_kind = bo->kind;
+   /* PTE kind for the mapping. NVK's new-uAPI VM_BIND carries the kind in the
+    * LOW BYTE of op->flags (nvkmd_nouveau_va.c: bind.flags = va->pte_kind; bit 8
+    * = SPARSE). An OPTIMAL image gets tile_flags=0 at GEM_NEW (so bo->kind=0),
+    * but its real block-linear kind (e.g. ZF32=0x7b for a D32 depth/ZETA surface,
+    * or a colour kind) arrives HERE in op->flags. Honor op->flags; fall back to
+    * bo->kind only for dedicated/modifier images that set it at GEM_NEW.
+    * (Was bo->kind alone, which mapped the block-linear ZETA depth surface as
+    * Pitch -> GM20B GR fault on CLEAR_SURFACE(Z). Confirmed via NVK source.) */
+   NvKind map_kind = (NvKind)(op->flags & 0xff);
+   if (map_kind == 0) map_kind = bo->kind;
    Result rc = nvioctlNvhostAsGpu_MapBufferEx(
       fd,
       NvMapBufferFlags_FixedOffset | NvMapBufferFlags_IsCacheable,

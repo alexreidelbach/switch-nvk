@@ -368,11 +368,21 @@ int main(void)
    };
    pUpdateDS(dev, 2, wr2, 0, NULL);
 
-   /* Z: depth DISABLED for now — clearing the GM20B ZETA surface (CLEAR_SURFACE
-    * method 0x19d0 with Z_ENABLE) raised a GR error. A convex cube with the same
-    * logo on every face renders correctly with backface culling and no depth, so
-    * we drop depth here to isolate VBO+UBO+3D; depth is a separate follow-up. */
-   LOG("Z depth DISABLED (isolating the CLEAR_SURFACE-on-Z GR error)");
+   /* Z: depth image + view (D32 ZETA). RE-ENABLED — with the VM_BIND kind fix the
+    * winsys now maps this block-linear with kind ZF32 (0x7b), so the GM20B ZETA
+    * unit + CLEAR_SURFACE(Z) work. */
+   VkImageCreateInfo zii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+      .format = VK_FORMAT_D32_SFLOAT, .extent = { SCN_W, SCN_H, 1 }, .mipLevels = 1, .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+   VkImage zimg = VK_NULL_HANDLE; r = pCreateImg(dev, &zii, NULL, &zimg);
+   if (r) { LOG("FAIL Z: depth img %d", r); goto done; }
+   VkDeviceMemory zmem = VK_NULL_HANDLE; ALLOC_IMG(zimg, zmem, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+   VkImageViewCreateInfo zvci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = zimg,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_D32_SFLOAT,
+      .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 } };
+   VkImageView zview = VK_NULL_HANDLE; r = pCreateView(dev, &zvci, NULL, &zview);
+   LOG("Z depth image -> %d", r); if (r) goto done;
 
    /* render target (color) image + view. */
    VkImageCreateInfo rii = tii; rii.extent = (VkExtent3D){ SCN_W, SCN_H, 1 };
@@ -385,25 +395,31 @@ int main(void)
    if (r) { LOG("FAIL N: rtview %d", r); goto done; }
 
    /* render pass: color + depth. */
-   VkAttachmentDescription atts[1] = {
+   VkAttachmentDescription atts[2] = {
       { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL },
+      { .format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL },
    };
    VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+   VkAttachmentReference zref = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
    VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-      .colorAttachmentCount = 1, .pColorAttachments = &cref };
+      .colorAttachmentCount = 1, .pColorAttachments = &cref, .pDepthStencilAttachment = &zref };
    VkSubpassDependency dep = { .srcSubpass = 0, .dstSubpass = VK_SUBPASS_EXTERNAL,
       .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
       .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
    VkRenderPassCreateInfo rpci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-      .attachmentCount = 1, .pAttachments = atts, .subpassCount = 1, .pSubpasses = &sub,
+      .attachmentCount = 2, .pAttachments = atts, .subpassCount = 1, .pSubpasses = &sub,
       .dependencyCount = 1, .pDependencies = &dep };
    VkRenderPass rp = VK_NULL_HANDLE; r = pCreateRP(dev, &rpci, NULL, &rp);
    if (r) { LOG("FAIL N: renderpass %d", r); goto done; }
+   VkImageView fbatt[2] = { rview, zview };
    VkFramebufferCreateInfo fbci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-      .renderPass = rp, .attachmentCount = 1, .pAttachments = &rview, .width = SCN_W, .height = SCN_H, .layers = 1 };
+      .renderPass = rp, .attachmentCount = 2, .pAttachments = fbatt, .width = SCN_W, .height = SCN_H, .layers = 1 };
    VkFramebuffer fbuf = VK_NULL_HANDLE; r = pCreateFB(dev, &fbci, NULL, &fbuf);
    if (r) { LOG("FAIL N: framebuffer %d", r); goto done; }
 
@@ -438,9 +454,8 @@ int main(void)
    VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba };
    VkGraphicsPipelineCreateInfo gpci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
       .stageCount = 2, .pStages = stages, .pVertexInputState = &vis, .pInputAssemblyState = &ias,
-      .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &msi,
+      .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &msi, .pDepthStencilState = &dss,
       .pColorBlendState = &cbs, .layout = pl, .renderPass = rp, .subpass = 0 };
-   (void)dss;   /* depth disabled (no depth attachment); see Z note above */
    VkPipeline pipe = VK_NULL_HANDLE; r = pCreateGP(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe);
    LOG("N vkCreateGraphicsPipelines -> %d", r); if (r != VK_SUCCESS) goto done;
 
@@ -469,9 +484,10 @@ int main(void)
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = tex, .subresourceRange = cr };
    pBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
 
-   VkClearValue clears[1]; clears[0].color = (VkClearColorValue){ .float32 = { 0.06f, 0.07f, 0.10f, 1.0f } };
+   VkClearValue clears[2]; clears[0].color = (VkClearColorValue){ .float32 = { 0.06f, 0.07f, 0.10f, 1.0f } };
+   clears[1].depthStencil = (VkClearDepthStencilValue){ 1.0f, 0 };
    VkRenderPassBeginInfo rpbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fbuf,
-      .renderArea = { { 0, 0 }, { SCN_W, SCN_H } }, .clearValueCount = 1, .pClearValues = clears };
+      .renderArea = { { 0, 0 }, { SCN_W, SCN_H } }, .clearValueCount = 2, .pClearValues = clears };
    pBeginRP(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
    pBindPipe(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
    pBindDS(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &dset, 0, NULL);

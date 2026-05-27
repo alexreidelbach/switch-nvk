@@ -32,10 +32,24 @@ file inventory, the exact M1/M2 symbol spec, next steps).**
   - **Settled:** GM20B fully usable with ZERO FECS/priv-reg writes (Mesa 20 `nvc0_magic_3d_init` proves
     it) → v28 no-op of `nvk_mme_set_priv_reg` is correct; both init priv-writes non-essential, the
     conservative-raster one lazy/draw-time. NVK self-uploads its 3D golden state + MME macros.
-- **NEXT: M3 — the triangle + present.** Real `vkCmdDraw` into a VkImage + WSI/swapchain over libnx
-  `nwindow`/`vi` (ref `dantiicu/vulkan-triangle-test-switch`). When cross-submit reads appear, add the
-  **flush cmdlist + NO_PREFETCH NOP barrier after kickoff** (`pushbuf.c:255-264`) for inter-submit
-  coherency. (Web-research agent `ac4f935a22fcb4362` hit its session limit — resume for GM20B/WSI gotchas.)
+- **🎉 M3 GRAPHICS WORKING ON REAL TEGRA (2026-05-27):** our NVK does, all shown on the Switch TV (libnx
+  framebuffer blit of NVK-rendered images): a drawn **triangle** (NAK shaders) → **textured quad** ("VULKAN"
+  logo: texture upload + sampler + descriptor set) → **3D textured cube** (vertex buffer + MVP UBO +
+  descriptor) **spinning @ vsync 60 fps** → **3D cube WITH a depth buffer** → and a **POC running
+  SaschaWillems/Vulkan's VERBATIM `triangle.vert/.frag`** (MIT) compiled by our NAK = the canonical RGB
+  Vulkan triangle, established PC code on our driver. Apps: `winsys/smoke/{nvk_tri,nvk_logo,nvk_scene,nvk_poc}.c`;
+  shaders → `gen-shaders.sh`(glslangValidator) → `tri_shaders.h`; `build-nro.sh` takes `APP/TITLE/VERSION`.
+  - **DEPTH ✅ RESOLVED (the universal 3D blocker — fix-once → all 3D + Dawn-over-Vulkan ports).** Root
+    cause: `src/vulkan/runtime/vk_image.c` sets `drm_format_mod=INVALID` only `#if LINUX||BSD`; our HORIZON
+    port left it `0`=`MOD_LINEAR` → NIL forced ALL images linear → GM20B ZETA GR-faults on `CLEAR_SURFACE`(Z).
+    Fix: **(1)** add `DETECT_OS_HORIZON` to that guard (folded into the patch); **(2)** `drm_shim.c vm_bind_op`
+    takes the PTE kind from `op->flags & 0xff` (NVK puts it there for the new uAPI, not GEM_NEW tile_flags).
+    Confirmed: depth `pte_kind=0x7b`, `gob=1`, no ERRNOTIF, cube renders. Diagnosed by instrumenting NIL
+    (ground-truth `mod=0x0`) — code-reading "should be 0x7b" vs HW "0" only broke once we INSTRUMENTED. See [[nvk-winsys-debugging-patterns]] #13.
+  - **Lessons:** `DRM_SHIM_DEBUG` per-frame SD `fflush` throttled the spin to ~10fps (build without it for 60);
+    framebuffer apps fault on process teardown (irrelevant for a POC photo); present = libnx framebuffer, not Vulkan WSI yet.
+- **NEXT:** the `texturecubemap` POC (6-layer CUBE image + `samplerCube` + Sascha's skybox shaders, saved as
+  `sascha_skybox.{vert,frag}`); then real WSI/swapchain over `nwindow`/`vi` (ref `dantiicu/vulkan-triangle-test-switch`).
 - **Reproducible/durable:** the 8 Mesa source patches are in `patches/switch-nvk-mesa-25.0.7.patch`
   (`apply-patches.sh` restores idempotently). Build = `build-native-tools.sh` → `configure-mesa.sh`
   → `ninja`; the smoke `.nro` via `winsys/build-nro.sh`. ⚠️ The `nvk_cmd_draw.c` FECS no-op patch is a
