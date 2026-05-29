@@ -1,8 +1,42 @@
 # PLAN — real WSI over libnx `nwindow` (VK_NN_vi_surface) for switch-nvk
 
-**Status: DESIGN (2026-05-27). Branch `switch-port/nvk-wsi`.**
-This is the proper present path Dan pointed at. It replaces the abandoned headless-surface
-shortcut (see "Why headless failed" below).
+**Status (2026-05-29):**
+- **M-WSI-0** ✅ surface + swapchain create (commit `0255d30`)
+- **M-WSI-1** ✅ present via Approach B (CPU-wait + queue NULL), proven on
+  real Tegra in `dusklight.nro` (Dusklight boota e renderiza UI)
+- **M-WSI-2** 🚧 zero-copy (Approach A) — receita completa do Ghidra do Dan
+  abaixo (§5)
+- **M-WSI-3** 🚧 native fence payload (depende de M-WSI-2)
+- **Branch ativa:** `switch-port/wsi-zero-copy` (esse trabalho).
+  Mais ampla `switch-port/nvk-wsi` ainda mantém M-WSI-1.
+
+Este doc é o plano consolidado: M-WSI design original (M-WSI-0/1 já feitos) +
+o roadmap completo de performance (M-WSI-2/3 + cut Dawn + pipeline cache).
+
+## TL;DR — por que isso importa
+
+Hoje Dusklight roda em **~17 fps**. Profile `aurora_end`:
+
+```
+total=58.8ms
+  render=0.77    GPU command build
+  rml=5.9        RmlUi UI draw
+  copy=0.032     (zero-copy mata esse, mas já é insignificante)
+  submit=16.4    GPU exec + fence wait
+  present=35.6   ⭐ vsync wait — gargalo serial
+```
+
+Com zero-copy + native fence + triple buffer, pipeline destrava e levanta
+para **~30 fps** (capado pelo vsync do dock @ 30Hz).
+
+| Otimização | Esforço | Ganho | Fonte da receita |
+|---|---|---|---|
+| **M-WSI-2 (zero-copy NO_BLIT)** | 1-2 sem | 17 → 25-30 fps | `dan-re/RE_NOTES.md` §131-178 |
+| **M-WSI-3 (native NvMultiFence)** | 3-5 dias | abre present | `dan-re/RE_NOTES.md` §82-97 |
+| Triple buffering (≥3 NvGraphicBuffers) | 1-2 dias | mantém GPU ocupada | `RE_NOTES.md` §136 (cap 4) |
+| Cortar Dawn (Aurora→Vulkan direto) | 3-5 sem | +20-30% extra | engenharia nova |
+| NAK pipeline cache warm-boot | 2-3 dias | elimina spikes iniciais | NVK upstream |
+| Batching GX (reduzir draws/frame) | semanas | depende cena | profile-driven |
 
 ## Dan's hints — keep these in mind always
 > **"Understand NVK, understand nwindow, libnx, build a WSI — you are done."**
@@ -185,8 +219,235 @@ winsys/drm_shim.c  — expose a BO's nvmap id + NIL layout to build the NvGraphi
   spinning quad). Reuses our proven device/swapchain/render code from `nvk_swapchain.c`.
 - Fold the durable Mesa edits into `patches/switch-nvk-mesa-25.0.7.patch`.
 
+---
+
+## 5. M-WSI-2: receita exata do Ghidra do Dan (zero-copy / NO_BLIT)
+
+> Esses são os endereços decompilados em `dan-re/RE_NOTES.md` §131-178. Não
+> reinventem — copiem o algoritmo.
+
+### 5.1 `wsi_switch_surface_create_swapchain` (Ghidra: `FUN_71000f3600`)
+
+```c
+// Cap minImageCount a 4 (chain stride 0x118, base 0x278)
+if (pCreateInfo->minImageCount > 4) return VK_ERROR_OUT_OF_DATE_KHR;
+
+// Format gate: SÓ R8G8B8A8 (37) e B8G8R8A8 (44)
+if (format == VK_FORMAT_R8G8B8A8_UNORM) {
+    pixfmt_idx = 1;
+    nvcolor_format = 0x532120;
+} else if (format == VK_FORMAT_B8G8R8A8_UNORM) {
+    pixfmt_idx = 5;
+    nvcolor_format = 0xd12120;
+} else {
+    return -0xb;
+}
+
+// armazenar em chain+0x26c / +0x270 (com flag | 0x100000000)
+wsi_swapchain_init(swapchain, ..., WSI_SWAPCHAIN_NO_BLIT);  // ⭐ NO_BLIT
+nwindowSetDimensions(nw, extent.width, extent.height);     // FUN_71004e87f0
+
+// per-image build (até 4)
+for (i = 0; i < image_count; i++) {
+    build_nvgraphic_buffer_and_configure(i);  // §5.2 (FUN_71000f2c00)
+}
+
+// slot table at chain+0x338 (stride 0x118) init 0xffffffff
+// vtable:
+//   acquire        = FUN_71000f3910  (§5.3)
+//   get_wsi_image  = FUN_71000f2a00
+//   queue_present  = FUN_71000f3c40  (§5.4)
+//   destroy        = FUN_71000f3440
+//   release_images = FUN_71000f2a00
+```
+
+### 5.2 NvGraphicBuffer construction (Ghidra: `FUN_71000f2c00`)
+
+```c
+// Passo 1-3: padrão Vulkan
+vkCreateImage(...);                    // 2D, swapchain format, extent
+vkGetImageMemoryRequirements(...);     // pick mem type (loop memoryTypeBits)
+vkAllocateMemory(... VK_MEMORY_DEDICATED_ALLOCATE_INFO ...);  // sType 5
+vkBindImageMemory(...);
+
+// Passo 4: pull NIL layout (FUN_71000d31b0)
+// retorna: nvmap_id, stride, block_height, size
+// EQUIVALENTE NOSSO: precisamos novo helper em drm_shim — veja §5.5
+
+// Passo 5: NvGraphicBuffer (memset 0x150 bytes, depois preenche)
+NvGraphicBuffer gb = {0};
+*(uint64_t*)(&gb + 0x0) = 0x2adaffcaff;          // magic 0xDAFFCAFF | (pid 42 << 32)
+gb.format = pixfmt_idx;                          // 1 (RGBA8) ou 5 (BGRA8)
+gb.ext_format = gb.format;
+gb.num_planes = 1;
+gb.planes[0].color_format = nvcolor_format;      // 0x532120 ou 0xd12120
+gb.planes[0].layout = NV_LAYOUT_BLOCK_LINEAR;    // != LINEAR
+gb.planes[0].kind = 0xfe;                        // ⭐ Generic_16BX2 (compositor kind)
+                                                 //   ≠ NIL's pte_kind (que é 0)
+gb.planes[0].block_height_log2 = nil_block_height_log2;  // GOB-8 → small log2
+gb.planes[0].width = extent.width;
+gb.planes[0].height = extent.height;
+gb.planes[0].stride = nil_stride;
+gb.planes[0].size = nil_size;
+// outros consts: 0xb00 (type/usage), 0x51 (header word) — confirmar Ghidra
+
+// Passo 6: registrar slot no nwindow (FUN_71004e8880)
+nwindowConfigureBuffer(nw, slot=i, &gb);
+
+// Passo 7: estado interno
+chain->slot_to_image[i] = i;                     // identidade slot↔image
+chain->per_image_fence[i] = (NvMultiFence){0};
+```
+
+### 5.3 acquire (Ghidra: `FUN_71000f3910`)
+
+```c
+VkResult wsi_switch_acquire(swapchain, timeout, semaphore, fence, &image_idx) {
+    s32 slot; NvMultiFence mf;
+    Result rc = nwindowDequeueBuffer(nw, &slot, &mf);  // FUN_71004e8a00
+    if (R_FAILED(rc)) return VK_NOT_READY;             // (1)
+
+    int img = chain->slot_to_image[slot];
+    if (img < 0 || img != slot) {
+        nwindowCancelBuffer(nw, slot, NULL);           // FUN_71004e8bd0
+        return VK_ERROR_OUT_OF_DATE_KHR;               // 0xC4653214
+    }
+
+    chain->per_image_fence[img] = mf;                  // acquire-wait fence
+    *image_idx = img;
+    return VK_SUCCESS;
+}
+```
+
+### 5.4 present — peek native NvMultiFence (Ghidra: `FUN_71000f3c40`)
+
+```c
+VkResult wsi_switch_present(swapchain, image_idx, ...) {
+    VkFence render_fence = ...;  // último submit do app
+    NvMultiFence mf;
+    bool have_native = vk_fence_peek_native_payload(render_fence, &mf);
+
+    if (have_native) {
+        // ⭐ FAST PATH: VI compositor espera GPU-side
+        return nwindowQueueBuffer(nw, slot, &mf);
+    }
+
+    // FALLBACK (M-WSI-1 atual): host wait + queue NULL
+    vkWaitForFences(render_fence, ...);
+    return nwindowQueueBuffer(nw, slot, NULL);
+}
+```
+
+### 5.5 NvFence ↔ VkFence (drm_shim novos exports)
+
+Para o fast path acima funcionar, `VkFence` precisa ser exportável como
+`NvMultiFence`. Dan implementa via `VK_KHR_external_fence_fd`:
+
+- `vkGetFenceFdKHR` → retorna NvFence handle
+- `vkImportFenceFdKHR` → constrói VkFence a partir de NvFence
+- `get_fence_sync_type` retorna `MONITORED_FENCE` (NVC7B0_SET_MONITORED_FENCE_SIGNAL_ADDRESS_*)
+
+**Trabalho concreto no nosso drm_shim:**
+
+- Adicionar `vkGetFenceFdKHR` / `vkImportFenceFdKHR` exports no nvk_loaderless_vk.c
+- Em `drm_shim.c`, expor `drm_shim_syncobj_to_nvfence(handle, NvFence*)` helper
+- WSI side: `peek_native_payload` lê a fence assinada pelo último submit
+- Verificar interação com `nouveau_exec`'s `s->fence` storage (já fazemos)
+
+### 5.6 Checklist M-WSI-2/3
+
+- [ ] Acrescentar `WSI_SWAPCHAIN_NO_BLIT` path no nosso `wsi_common_switch.c`
+- [ ] Implementar `NvGraphicBuffer` build com kind=0xfe (§5.2)
+- [ ] Expor NIL layout do BO via drm_shim hook (§5.5)
+- [ ] `nwindowConfigureBuffer` por slot, identidade slot=image_idx
+- [ ] `vkAcquireNextImageKHR` → `nwindowDequeueBuffer` + slot→image (§5.3)
+- [ ] `vkQueuePresentKHR` fast path com NvMultiFence (§5.4)
+- [ ] Default `imageCount=3` (triple buffer)
+- [ ] Testar com `nvk_smoke` triangle primeiro
+- [ ] Depois `dusklight.nro` — profile esperado: `present<5ms`, fps≥25
+
+---
+
+## 6. Pós-WSI: roadmap de performance contínuo
+
+### 6.1 Cortar Dawn (Aurora → Vulkan direto)
+
+Dawn adiciona tradução WebGPU → Vulkan que custa ~3-5ms/frame em command
+buffer build + Tint shader compile. Para port Switch único, overhead puro.
+
+**Trabalho:**
+- Aurora hoje tem `lib/webgpu/`, `lib/metal/`, `lib/d3d12/`. Adicionar `lib/vulkan/`
+- Pipeline cache (descritor GX → VkPipeline)
+- Render pass setup (GX EFB → Vulkan FB)
+- Texture upload (GX format → Vulkan via NIL)
+- Shader emit: gerar SPIR-V direto (não WGSL→Tint)
+
+3-5 semanas. Acelera todos os ports Switch que usem Aurora.
+
+### 6.2 NAK pipeline cache warm-boot
+
+NVK suporta `VkPipelineCache` serialização. Hoje recompilamos pipelines a cada
+boot do `.nro`.
+
+```c
+// Engine boot
+FILE* f = fopen("sdmc:/dusklight/pipeline_cache.bin", "rb");
+...
+vkCreatePipelineCache(... &cacheInfo ...);
+
+// Shutdown ou após N pipelines novos
+vkGetPipelineCacheData(cache, &size, data);
+fwrite(data, 1, size, ...);
+```
+
+2-3 dias. Elimina spikes do 1º run em Ordon (~1-2 segundos de stutter).
+
+### 6.3 Batching GX
+
+Profile mostra ~60-200 draws/frame em Hyrule Field. Muitos consecutivos com
+mesmo material, só vertex buffer diferente. Aurora poderia fundir em
+`vkCmdDrawIndexed` único com instance offset.
+
+Profile-driven, não bloqueante. Médio-longo prazo.
+
+---
+
+## 7. Como começar
+
+```bash
+cd /d/switch-nvk
+git checkout switch-port/wsi-zero-copy   # branch desse trabalho
+
+# 1. Reler decompile do Dan
+less dan-re/RE_NOTES.md   # §131-178 é o que importa
+
+# 2. Editar mesa-25/src/vulkan/wsi/wsi_common_switch.c
+#    - Acrescentar caminho NO_BLIT (§5.1)
+#    - Build NvGraphicBuffer com kind=0xfe (§5.2)
+
+# 3. Editar winsys/drm_shim.c
+#    - Expor BO nvmap_id + NIL layout (§5.5)
+#    - drm_shim_syncobj_to_nvfence helper
+
+# 4. Build via Docker image já publicada
+docker run --rm -v "$(pwd):/work" -w /work \
+    ghcr.io/hayatog/switch-nvk-build:latest \
+    bash compat/build-mesa.sh
+
+# 5. Testar primeiro com nvk_smoke
+nxlink -s -a 192.168.1.6 winsys/smoke/nvk_tri.nro
+
+# 6. Depois com Dusklight (rebuild + deploy)
+cd /d/Projects/dusklight
+bash platforms/switch/build-docker.sh build-only
+nxlink -s -a 192.168.1.6 /d/dusklight-build-nvk/dusklight.nro
+```
+
+---
+
 ## References
 - Dan's WSI template: `github.com/dantiicu/vulkan-triangle-test-switch/TriangleTest.cpp` (MIT) — the VI surface + swapchain flow above.
+- **Dan's Ghidra decompile:** `dan-re/RE_NOTES.md` neste repo — receitas exatas para M-WSI-2/3.
 - Backend template: `mesa-25/src/vulkan/wsi/wsi_common_headless.c` (same `wsi_interface` contract).
 - libnx nwindow API: `switch/display/native_window.h` (Configure/Dequeue/Queue), `switch/nvidia/graphic_buffer.h` (`NvGraphicBuffer`/`NvSurface` — the layout fields), `switch/display/framebuffer.h` (`framebufferCreate` = a known-correct `NvGraphicBuffer` build to copy).
 - Layout ground-truth: NIL tiling (`pte_kind`, `gob_height_log2`) vs libnx `Framebuffer`/`nvmap`. See the depth fix in [[vulkan-nvk-switch-path]] for the kind-matching method (instrument, don't code-read).
