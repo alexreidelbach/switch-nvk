@@ -809,7 +809,8 @@ static int nouveau_vm_bind(struct drm_nouveau_vm_bind *req)
       (const struct drm_nouveau_sync *)(uintptr_t)req->sig_ptr;
    for (uint32_t i = 0; i < req->sig_count; i++) {
       struct shim_syncobj *s = syncobj_lookup(sigs[i].handle);
-      if (s) { s->signaled = true; s->has_fence = false; }
+      /* empty EXEC: signal immediately (no GPU work) -> the timeline point is reached now. */
+      if (s) { s->signaled = true; s->has_fence = false; s->value = sigs[i].timeline_value; }
    }
    return 0;
 }
@@ -847,7 +848,9 @@ static int nouveau_exec(struct drm_nouveau_exec *req)
       nvGpuChannelGetFence(&ch->chan, &f);
       for (uint32_t i = 0; i < req->sig_count; i++) {
          struct shim_syncobj *s = syncobj_lookup(sigs[i].handle);
-         if (s) { s->fence = f; s->has_fence = true; s->signaled = true; }
+         /* Attach the GPU fence + record the TIMELINE point this submit signals. The point
+          * counts as "reached" only when this fence completes (drmSyncobjQuery polls it). */
+         if (s) { s->fence = f; s->has_fence = true; s->signaled = true; s->value = sigs[i].timeline_value; }
       }
       return 0;
    }
@@ -1325,12 +1328,24 @@ int drmSyncobjQuery(int fd, uint32_t *handles,
                     uint64_t *points, uint32_t handle_count)
 {
    if (!drm_shim_owns_fd(fd)) { errno = EBADF; return -EBADF; }
-   mutexLock(&g_dev.lock);
+   /* Return the timeline value (s->value) ONLY once its GPU fence has completed
+    * -- otherwise report 0 (conservative). This keeps NVK's upload-queue recycle
+    * from reusing a BO the GPU still reads (a too-high value = corruption); the
+    * worst case of "0 while pending" is just an extra fresh BO, never unsafe.
+    * Snapshot the fence under the lock, poll it (0 timeout) OUTSIDE the lock. */
    for (uint32_t i = 0; i < handle_count; i++) {
+      mutexLock(&g_dev.lock);
       struct shim_syncobj *s = syncobj_lookup(handles[i]);
-      if (points) points[i] = s ? s->value : 0;
+      bool     has_fence = s && s->has_fence;
+      uint64_t value     = s ? s->value : 0;
+      NvFence  fence     = has_fence ? s->fence : (NvFence){0};
+      mutexUnlock(&g_dev.lock);
+
+      uint64_t reached = value;                 /* no fence => already reached */
+      if (has_fence && R_FAILED(nvFenceWait(&fence, 0)))
+         reached = 0;                           /* GPU still busy => conservative */
+      if (points) points[i] = reached;
    }
-   mutexUnlock(&g_dev.lock);
    return 0;
 }
 
@@ -1423,14 +1438,33 @@ int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
    return -ENOSYS;
 }
 
-/* Capabilities. Report no timeline syncobj so NVK uses the binary path only
- * (sufficient for the placeholder triangle); everything else reads back 0. */
+/* Capabilities. We DO advertise binary + TIMELINE syncobj support: NVK's upload
+ * queue (nvk_upload_queue) creates a TIMELINE sync (sync_types[0] must have
+ * VK_SYNC_FEATURE_TIMELINE) and calls vk_sync_get_value() on the recycle path
+ * once the upload BO fills (many shaders -> the game; the placeholder triangle
+ * never filled it). Without the timeline cap, NVK's sync type has a NULL
+ * get_value -> nvk_upload_queue_reserve calls null -> Instruction Abort. Our
+ * drmSyncobjQuery/TimelineSignal/TimelineWait back it (the timeline point lives
+ * in shim_syncobj.value; submits drain, so the value reflects GPU completion). */
+#ifndef DRM_CAP_SYNCOBJ
+#define DRM_CAP_SYNCOBJ          0x13
+#endif
+#ifndef DRM_CAP_SYNCOBJ_TIMELINE
+#define DRM_CAP_SYNCOBJ_TIMELINE 0x14
+#endif
 int drmGetCap(int fd, uint64_t capability, uint64_t *value)
 {
-   (void)capability;
    if (!drm_shim_owns_fd(fd)) { errno = EBADF; return -EBADF; }
-   if (value)
+   if (!value) return 0;
+   switch (capability) {
+   case DRM_CAP_SYNCOBJ:
+   case DRM_CAP_SYNCOBJ_TIMELINE:
+      *value = 1;   /* binary + timeline syncobjs supported (see note above) */
+      break;
+   default:
       *value = 0;
+      break;
+   }
    return 0;
 }
 
