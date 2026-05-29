@@ -29,3 +29,19 @@ dan-re/ghidra_proj/
 dan-re/_*.txt
 
 # Keep: Dockerfile, *.sh, *.json, *.md, compat/, patches/, pristine-25.0.7/, UNDEFINED_SYMBOLS.txt
+
+# Ghidra project workspaces (binary, regeneratable from .nro analysis)
+dan-re/ghidra_proj*/
+
+# Large analysis dumps (regeneratable via dan-re/*.py scripts)
+dan-re/_strings.txt
+dan-re/_decomp*.txt
+dan-re/_cmdproc_dive.txt
+dan-re/_emitter_dive.txt
+dan-re/_deep_dusk.txt
+dan-re/_final.log
+dan-re/_appbuild.log
+dan-re/_*.log
+
+# The reverse-engineered .nro itself (Dan's MIT-released binary; not redistributable from us)
+dan-re/*.nro
