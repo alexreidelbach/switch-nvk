@@ -530,6 +530,34 @@ static int nouveau_gem_info(struct drm_nouveau_gem_info *info)
    return 0;
 }
 
+/* ---- switch-nvk WSI zero-copy (A1) -----------------------------------------
+ * Given a GPU VA that falls inside a bound BO, expose that BO's libnx nvmap
+ * *id* (the cross-process handle the VI compositor needs), its size and PTE
+ * kind. The WSI backend (wsi_common_switch.c) uses this to wrap a swapchain
+ * image's device memory in an NvGraphicBuffer (nwindowConfigureBuffer) so the
+ * VI compositor scans out the rendered image directly — no per-frame CPU copy
+ * (kills the ~9.4ms memcpy the present profiling found). Returns false if no
+ * bound BO covers the VA. Thread-safe (takes the device lock).               */
+bool drm_shim_bo_nvmap_by_va(uint64_t gpu_va, uint32_t *out_nvmap_id,
+                             uint64_t *out_size, uint32_t *out_kind)
+{
+   bool found = false;
+   mutexLock(&g_dev.lock);
+   for (int b = 0; b < SHIM_MAX_BOS; b++) {
+      struct shim_bo *bo = &g_dev.bos[b];
+      if (bo->used && bo->gpu_va && gpu_va >= bo->gpu_va &&
+          gpu_va < bo->gpu_va + bo->size) {
+         if (out_nvmap_id) *out_nvmap_id = nvMapGetId(&bo->map);
+         if (out_size)     *out_size     = bo->size;
+         if (out_kind)     *out_kind     = (uint32_t)bo->kind;
+         found = true;
+         break;
+      }
+   }
+   mutexUnlock(&g_dev.lock);
+   return found;
+}
+
 static int nouveau_gem_cpu_prep(struct drm_nouveau_gem_cpu_prep *req)
 {
    /* CPU-side wait for BO idle. We don't track per-BO fences yet; submissions

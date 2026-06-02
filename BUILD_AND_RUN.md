@@ -62,12 +62,22 @@ Obtain Mesa **25.0.7** and apply our patches:
 #   tar xf mesa-25.0.7.tar.xz ; rename the extracted dir to  mesa-25
 # Then apply the 9 Switch source patches (idempotent):
 docker run --rm -v "D:\switch-nvk:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
+# Then install the VI/nwindow WSI backend + zero-copy present + the mesa source overrides
+# (idempotent). REQUIRED — without it there is no swapchain/present and no zero-copy:
+docker run --rm -v "D:\switch-nvk:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 ```
 
 The authoritative patches live in `patches/switch-nvk-mesa-25.0.7.patch` (9 files, including the **FECS
 no-op** in `nvk_cmd_draw.c` that is essential to the PASS). `pristine-25.0.7/` holds the unmodified
 upstreams for re-diffing. `apply-patches.sh` is idempotent (skips if `DETECT_OS_HORIZON` is already
 present). The 9 patched files and why are listed in `RESUME_NVK.md` → "The source patches".
+
+**`apply-wsi-switch.sh`** installs the `VK_NN_vi_surface`/`nwindow` WSI backend
+(`winsys/wsi/wsi_common_switch.c` — incl. the **zero-copy block-linear present**, `kind=0xfe`) plus the
+verbatim source overrides under **`winsys/mesa-edits/`** (`nvk_image.c` — the load-bearing
+`nvk_switch_image_layout` NIL-layout helper; `nvk_queue.c`/`wsi_common.c` — the `NVK_TRACE`-gated debug
+logs). These are committed VERBATIM (not patched) to dodge CRLF/patch fuzz; the script `cp`s them over
+the extracted tree and is idempotent. Zero-copy details: `RESUME_NVK.md` → "Zero-copy WSI".
 
 ---
 

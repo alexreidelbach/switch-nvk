@@ -14,6 +14,17 @@ N="$M/src/nouveau/vulkan"
 # 1. the backend (new file)
 cp "$ME/wsi_common_switch.c" "$W/wsi_common_switch.c"
 
+# 1b. switch-nvk source overrides (verbatim copies, NOT patched — dodges CRLF/patch
+#     fuzz). These carry: the zero-copy NIL-layout helper `nvk_switch_image_layout`
+#     (nvk_image.c, LOAD-BEARING for the kind=0xfe scanout) + the NVK_TRACE log gates
+#     (nvk_queue.c qe_log, wsi_common.c sc_log, nvk_image.c image trace). The
+#     wsi_common.c override already includes the perl init/finish edits below, so
+#     steps 4's grep-guards become no-ops (idempotent).
+EDITS="$ME/../mesa-edits"
+cp "$EDITS/src/nouveau/vulkan/nvk_image.c" "$N/nvk_image.c"
+cp "$EDITS/src/nouveau/vulkan/nvk_queue.c" "$N/nvk_queue.c"
+cp "$EDITS/src/vulkan/wsi/wsi_common.c"    "$W/wsi_common.c"
+
 # 2. wsi_common.h — size the wsi[] array for VK_ICD_WSI_PLATFORM_VI (=12, past METAL)
 grep -q 'VK_USE_PLATFORM_VI_NN' "$W/wsi_common.h" || perl -0777 -pi -e \
   's/#define VK_ICD_WSI_PLATFORM_MAX \(VK_ICD_WSI_PLATFORM_METAL \+ 1\)/#ifdef VK_USE_PLATFORM_VI_NN\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)\n#else\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)\n#endif/' \

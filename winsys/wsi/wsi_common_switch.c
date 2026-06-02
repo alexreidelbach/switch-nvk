@@ -29,9 +29,81 @@
 
 #include <vulkan/vulkan_vi.h>   /* VkViSurfaceCreateInfoNN (needs VK_USE_PLATFORM_VI_NN) */
 #include <switch.h>
+#include <stdio.h>              /* snprintf for the present-path profiler */
 
 /* VkIcdSurfaceVi { VkIcdSurfaceBase base; void *window; } is defined by vk_icd.h.
  * .window holds the libnx NWindow* (cast on use). */
+
+/* Present-path profiler sink. Dusklight defines a strong extern "C" dusk_switch_log
+ * (writes sdmc:/dusklight.log, pulled over FTP). The weak no-op fallback keeps the
+ * standalone smoke NROs (which don't link Dusklight) building/linking unchanged. */
+void dusk_switch_log(const char *msg);
+__attribute__((weak)) void dusk_switch_log(const char *msg) { (void)msg; }
+
+/* ---- A1 zero-copy present (block-linear, kind=0xfe) ------------------------
+ * Helpers from the winsys (drm_shim.c) and the NVK driver (nvk_image.c). The
+ * VI compositor scans out the rendered block-linear image directly: present =
+ * nwindowQueueBuffer, no per-frame CPU copy/swizzle. Recipe = Dan-RE
+ * FUN_71000f2c00 + dan-re/RE_NOTES.md §131-178. */
+extern bool drm_shim_bo_nvmap_by_va(uint64_t gpu_va, uint32_t *out_nvmap_id,
+                                    uint64_t *out_size, uint32_t *out_kind);
+extern bool nvk_switch_image_layout(VkImage image, uint32_t *row_stride_B,
+                                    uint32_t *block_height_log2, uint64_t *offset_B,
+                                    uint64_t *size_B, uint8_t *pte_kind,
+                                    uint64_t *gpu_va);
+
+/* Fill `gb` so nwindowConfigureBuffer registers `image`'s block-linear memory as
+ * a scanout buffer. Returns false if the NIL layout / nvmap can't be resolved
+ * (caller falls back). memset 0 then set the documented fields; libnx overwrites
+ * the NativeHandle header + trailing bookkeeping during marshalling. */
+static bool
+wsi_switch_build_graphic_buffer(NvGraphicBuffer *gb, VkImage image,
+                                VkFormat vk_format, VkExtent2D extent)
+{
+   uint32_t row_stride_B = 0, block_height_log2 = 0, bo_kind = 0, nvmap_id = 0;
+   uint64_t offset_B = 0, nil_size_B = 0, gpu_va = 0, bo_size = 0;
+   uint8_t  pte_kind = 0;
+
+   if (!nvk_switch_image_layout(image, &row_stride_B, &block_height_log2,
+                                &offset_B, &nil_size_B, &pte_kind, &gpu_va))
+      return false;
+   if (!drm_shim_bo_nvmap_by_va(gpu_va, &nvmap_id, &bo_size, &bo_kind))
+      return false;
+
+   const bool bgra = (vk_format == VK_FORMAT_B8G8R8A8_UNORM);
+   memset(gb, 0, sizeof(*gb));
+   /* NativeHandle: num_ints = count of u32 words after the handle. WITHOUT this the
+    * marshalled GraphicBuffer is empty -> bqSetPreallocatedBuffer "succeeds" but
+    * bqDequeueBuffer returns WouldBlock forever (the dequeue-hang bug). Mirrors libnx
+    * framebufferCreate. */
+   gb->header.num_fds  = 0;
+   gb->header.num_ints = (sizeof(NvGraphicBuffer) - sizeof(NativeHandle)) / 4;
+   gb->unk0        = -1;
+   gb->nvmap_id    = (s32)nvmap_id;
+   gb->magic       = 0xDAFFCAFF;
+   gb->pid         = 42;
+   gb->usage       = 0xb00;                 /* GRALLOC scanout usage (Dan RE §5.2) */
+   gb->format      = bgra ? PIXEL_FORMAT_BGRA_8888 : PIXEL_FORMAT_RGBA_8888;
+   gb->ext_format  = gb->format;
+   gb->stride      = row_stride_B / 4;       /* RGBA8 = 4 B/px; field is in PIXELS  */
+   gb->total_size  = (u32)nil_size_B;
+   gb->num_planes  = 1;
+   gb->planes[0].width             = extent.width;
+   gb->planes[0].height            = extent.height;
+   gb->planes[0].color_format      = bgra ? NvColorFormat_A8R8G8B8 : NvColorFormat_A8B8G8R8;
+   gb->planes[0].layout            = NvLayout_BlockLinear;    /* = 3                  */
+   gb->planes[0].pitch             = row_stride_B;
+   gb->planes[0].offset            = (u32)offset_B;
+   gb->planes[0].kind              = NvKind_Generic_16BX2;    /* = 0xfe, display kind */
+   gb->planes[0].block_height_log2 = block_height_log2;
+   gb->planes[0].scan              = NvDisplayScanFormat_Progressive;
+   gb->planes[0].size              = nil_size_B;
+   printf("[wsi-zc] gb: nvmap=%u stride_px=%u pitch_B=%u bh_log2=%u size=%llu pte_kind=%u gpu_va=0x%llx\n",
+          nvmap_id, gb->stride, row_stride_B, block_height_log2,
+          (unsigned long long)nil_size_B, pte_kind, (unsigned long long)gpu_va);
+   fflush(stdout);
+   return true;
+}
 
 /* ---- surface ---- */
 
@@ -201,18 +273,21 @@ wsi_switch_surface_get_present_rectangles(VkIcdSurfaceBase *icd_surface,
 
 struct wsi_switch_image {
    struct wsi_image base;
+   NvGraphicBuffer gb;        /* registered with the nwindow at slot == image index */
+   NvMultiFence acquire_fence;/* producer fence from the last dequeue of this slot   */
+   bool configured;           /* nwindowConfigureBuffer succeeded for this slot       */
    bool busy;
 };
 
 struct wsi_switch_swapchain {
    struct wsi_swapchain base;
    NWindow *window;
-   Framebuffer fb;          /* libnx framebuffer = N nwindow buffers (NvGraphicBuffer +
-                             * nwindowConfigureBuffer, built correctly by libnx) */
+   bool zero_copy;          /* all images registered as nwindow scanout buffers       */
+   Framebuffer fb;          /* CPU-copy fallback path (libnx framebuffer)             */
    bool fb_created;
    VkExtent2D extent;
    VkFormat vk_format;
-   uint32_t next;           /* round-robin acquire index */
+   uint32_t next;           /* round-robin acquire index (fallback path)              */
    struct wsi_switch_image images[WSI_SWITCH_MAX_IMAGES];
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_switch_swapchain, base.base, VkSwapchainKHR,
@@ -231,8 +306,34 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
                                         uint32_t *image_index)
 {
    struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
-   /* Round-robin a free render image; the actual nwindow dequeue/queue throttle
-    * happens in queue_present via the libnx framebuffer (CPU-copy milestone). */
+
+   /* Zero-copy: dequeue a free nwindow slot (slot == image index, identity). The
+    * producer fence says when the compositor is done reading it — wait it on the
+    * CPU so the app never renders over a buffer still on screen (no tearing). */
+   if (chain->zero_copy) {
+      static uint32_t dbg = 0;
+      bool trace = (dbg++ < 4);
+      s32 slot = -1;
+      NvMultiFence mf;
+      memset(&mf, 0, sizeof(mf));
+      if (trace) { printf("[wsi-zc] acquire: dequeue...\n"); fflush(stdout); }
+      Result rc = nwindowDequeueBuffer(chain->window, &slot, &mf);
+      if (trace) { printf("[wsi-zc] acquire: dequeue -> 0x%x slot=%d\n", (unsigned)rc, slot); fflush(stdout); }
+      if (R_FAILED(rc))
+         return VK_NOT_READY;
+      if (slot < 0 || (uint32_t)slot >= chain->base.image_count) {
+         nwindowCancelBuffer(chain->window, slot, NULL);
+         return VK_ERROR_OUT_OF_DATE_KHR;
+      }
+      nvMultiFenceWait(&mf, 1000000 /* 1s */);
+      if (trace) { printf("[wsi-zc] acquire: fence waited, slot=%d ready\n", slot); fflush(stdout); }
+      chain->images[slot].acquire_fence = mf;
+      chain->images[slot].busy = true;
+      *image_index = (uint32_t)slot;
+      return VK_SUCCESS;
+   }
+
+   /* Fallback (non-zero-copy): round-robin a free render image. */
    for (uint32_t n = 0; n < chain->base.image_count; n++) {
       uint32_t i = (chain->next + n) % chain->base.image_count;
       if (!chain->images[i].busy) {
@@ -254,10 +355,29 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
    struct wsi_switch_image *img = &chain->images[image_index];
 
-   /* CPU-copy present: the rendered (host-visible) image -> the next libnx
+   /* Profiling: tick stamps per present phase. armGetSystemTick is ~19.2MHz, cheap. */
+   const u64 t_start = armGetSystemTick();
+   u64 t_fence = t_start, t_flush = t_start, t_copy = t_start;
+
+   /* Zero-copy present: the rendered block-linear image IS the nwindow buffer.
+    * Wait the render fence (the common WSI present signalled fences[image_index]),
+    * then hand the slot to the VI compositor. No CPU copy, no libnx swizzle — the
+    * GPU L2 flush in our fence cmdlist makes the block-linear writes visible to
+    * the display block directly. */
+   if (chain->zero_copy && img->configured) {
+      const struct wsi_device *wsi = chain->base.wsi;
+      if (chain->base.fences[image_index] != VK_NULL_HANDLE)
+         wsi->WaitForFences(chain->base.device, 1,
+                            &chain->base.fences[image_index], VK_TRUE, ~0ull);
+      t_fence = armGetSystemTick();             /* GPU render done                     */
+      t_flush = t_fence;                        /* no dcache flush / no copy            */
+      nwindowQueueBuffer(chain->window, (s32)image_index, NULL);
+      t_copy = armGetSystemTick();              /* nwindowQueueBuffer (VI queue) done   */
+   }
+   /* CPU-copy fallback: the rendered (host-visible) image -> the next libnx
     * framebuffer buffer (dequeue), row by row (strides differ), then present
-    * (queue). Zero-copy (image IS the nwindow buffer, kind=0xfe) comes later. */
-   if (chain->fb_created && img->base.cpu_map != NULL) {
+    * (queue). Active only when zero-copy registration failed. */
+   else if (chain->fb_created && img->base.cpu_map != NULL) {
       /* The common WSI present submitted the image->cpu_map blit ASYNCHRONOUSLY
        * (signalling fences[image_index]); wait for it, then invalidate the CPU
        * cache — GM20B is NOT IO-coherent, so a HOST_COHERENT map reads stale lines
@@ -269,7 +389,9 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
       if (chain->base.fences[image_index] != VK_NULL_HANDLE)
          wsi->WaitForFences(chain->base.device, 1,
                             &chain->base.fences[image_index], VK_TRUE, ~0ull);
+      t_fence = armGetSystemTick();            /* GPU render + WSI blit-to-cpu_map done */
       armDCacheFlush((void *)(uintptr_t)img->base.cpu_map, sz);
+      t_flush = armGetSystemTick();            /* dcache flush of the whole image done */
       u32 dst_stride = 0;
       u8 *dst = (u8 *)framebufferBegin(&chain->fb, &dst_stride);
       const u8 *src = (const u8 *)img->base.cpu_map;
@@ -277,6 +399,39 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
       for (u32 y = 0; y < chain->extent.height; y++)
          memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * src_stride, row_B);
       framebufferEnd(&chain->fb);
+      t_copy = armGetSystemTick();             /* memcpy + framebufferEnd (VI queue) done */
+   }
+
+   /* Accumulate per-phase ns; emit one averaged line every 60 presents (batched so
+    * the sdmc log write does not throttle the frame rate — see heuristics #9/#21). */
+   {
+      static u64 acc_fence = 0, acc_flush = 0, acc_copy = 0, acc_total = 0;
+      static u64 last_start = 0, acc_interval = 0;
+      static u32 nframes = 0, nintervals = 0;
+      acc_fence += armTicksToNs(t_fence - t_start);
+      acc_flush += armTicksToNs(t_flush - t_fence);
+      acc_copy  += armTicksToNs(t_copy  - t_flush);
+      acc_total += armTicksToNs(t_copy  - t_start);
+      if (last_start != 0) { acc_interval += armTicksToNs(t_start - last_start); nintervals++; }
+      last_start = t_start;
+      if (++nframes >= 60) {
+         unsigned long long fps = (acc_interval != 0)
+            ? (1000000000ull * (unsigned long long)nintervals) / (unsigned long long)acc_interval : 0;
+         char buf[256];
+         snprintf(buf, sizeof buf,
+            "[wsi-prof] over %u presents (avg us): fence/GPU=%llu dcacheflush=%llu memcpy+queue=%llu "
+            "present_total=%llu | frame_interval=%llu (~%llu fps)",
+            nframes,
+            (unsigned long long)(acc_fence / nframes / 1000),
+            (unsigned long long)(acc_flush / nframes / 1000),
+            (unsigned long long)(acc_copy  / nframes / 1000),
+            (unsigned long long)(acc_total / nframes / 1000),
+            nintervals ? (unsigned long long)(acc_interval / nintervals / 1000) : 0ull,
+            fps);
+         dusk_switch_log(buf);
+         acc_fence = acc_flush = acc_copy = acc_total = acc_interval = 0;
+         nframes = nintervals = 0;
+      }
    }
 
    img->busy = false;
@@ -298,6 +453,8 @@ wsi_switch_swapchain_destroy(struct wsi_swapchain *wsi_chain,
                              const VkAllocationCallbacks *pAllocator)
 {
    struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
+   if (chain->zero_copy)
+      nwindowReleaseBuffers(chain->window);
    if (chain->fb_created)
       framebufferClose(&chain->fb);
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
@@ -363,11 +520,34 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       chain->images[i].busy = false;
    }
 
-   /* Register N nwindow buffers via libnx (builds the NvGraphicBuffer + calls
-    * nwindowConfigureBuffer with the correct LINEAR layout). CPU-copy present
-    * mirrors the rendered host-visible image into the dequeued buffer.
-    * (Zero-copy: image IS the nwindow buffer, kind=0xfe — next optimization.) */
-   {
+   /* ZERO-COPY: register each rendered block-linear image directly as an nwindow
+    * scanout buffer (build the NvGraphicBuffer with kind=0xfe + the image's NIL
+    * layout, then nwindowConfigureBuffer). slot == image index (identity). If any
+    * image can't be wrapped, fall back to the libnx-framebuffer CPU-copy path. */
+   nvFenceInit();   /* required before nwindowDequeueBuffer / nvMultiFenceWait */
+   nwindowSetDimensions(chain->window, chain->extent.width, chain->extent.height);
+   chain->zero_copy = true;
+   for (uint32_t i = 0; i < num_images; i++) {
+      if (!wsi_switch_build_graphic_buffer(&chain->images[i].gb,
+                                           chain->images[i].base.image,
+                                           chain->vk_format, chain->extent)) {
+         printf("[wsi-zc] img%u build_graphic_buffer FAILED\n", i); fflush(stdout);
+         chain->zero_copy = false; break;
+      }
+      Result rc = nwindowConfigureBuffer(chain->window, (s32)i, &chain->images[i].gb);
+      printf("[wsi-zc] img%u nwindowConfigureBuffer -> 0x%x\n", i, (unsigned)rc); fflush(stdout);
+      if (R_FAILED(rc)) { chain->zero_copy = false; break; }
+      chain->images[i].configured = true;
+   }
+
+   if (chain->zero_copy) {
+      printf("[wsi-zc] zero-copy ENABLED (block-linear scanout, kind=0xfe)\n"); fflush(stdout);
+      dusk_switch_log("[wsi] zero-copy ENABLED (block-linear nwindow scanout, kind=0xfe)\n");
+   } else {
+      printf("[wsi-zc] zero-copy FAILED -> CPU-copy fallback\n"); fflush(stdout);
+      /* Fallback: reset the nwindow, then libnx framebuffer + CPU-copy present. */
+      for (uint32_t i = 0; i < num_images; i++) chain->images[i].configured = false;
+      nwindowReleaseBuffers(chain->window);
       u32 pixfmt = (chain->vk_format == VK_FORMAT_B8G8R8A8_UNORM)
                    ? PIXEL_FORMAT_BGRA_8888 : PIXEL_FORMAT_RGBA_8888;
       Result rc = framebufferCreate(&chain->fb, chain->window,
@@ -376,6 +556,7 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       if (R_FAILED(rc)) { result = VK_ERROR_INITIALIZATION_FAILED; goto fail; }
       framebufferMakeLinear(&chain->fb);
       chain->fb_created = true;
+      dusk_switch_log("[wsi] zero-copy FAILED -> CPU-copy fallback\n");
    }
 
    *swapchain_out = &chain->base;

@@ -4,7 +4,35 @@
 **GOAL (narrow): reproduce Dan's first artifact — a standalone "Vulkan art placeholder that
 depends on Vulkan to run" (the M3 triangle/smoke test). NO in-game, NO port integration.**
 
-Last updated: 2026-05-27.
+Last updated: 2026-06-02.
+
+---
+
+## 🎉 Zero-copy WSI — WORKING (2026-06-02)
+
+The `VK_NN_vi_surface`/`nwindow` swapchain now does a **true zero-copy block-linear present**: NVK renders
+into a `TILING_OPTIMAL` image that IS the nwindow scanout buffer (`kind=0xfe` = `NvKind_Generic_16BX2`,
+`layout=NvLayout_BlockLinear`), and present = `nwindowQueueBuffer` — **no CPU memcpy, no libnx swizzle.**
+Proven on the standalone smoke `nvk_vi_swapchain` (TV cycles colours cleanly, rock-solid) AND propagated
+into Dusklight: present dropped **9.6 ms → ~150 µs (64×)**, gameplay ~21 → ~28-30 fps.
+
+**Where it lives:** `winsys/wsi/wsi_common_switch.c` (the swapchain/acquire/present + the NvGraphicBuffer
+build), `winsys/drm_shim.c` (`drm_shim_bo_nvmap_by_va` — BO→nvmap-id by GPU VA), `winsys/mesa-edits/.../
+nvk_image.c` (`nvk_switch_image_layout` — NIL stride/block_height/pte_kind/gpu_va). All restored on a fresh
+mesa extract by `apply-wsi-switch.sh` (see BUILD_AND_RUN.md §2).
+
+**The two bugs that took it from black-screen → working (write these down):**
+1. **`NvGraphicBuffer.header.num_ints` must be set** to `(sizeof(NvGraphicBuffer)-sizeof(NativeHandle))/4`
+   (+ `num_fds=0`). Left 0, `bqSetPreallocatedBuffer` returns rc=0 but marshals an EMPTY GraphicBuffer →
+   `nwindowDequeueBuffer` hangs forever on frame 0 (black). Found by diffing libnx `framebufferCreate`.
+2. **`nvFenceInit()` is required** before `nwindowDequeueBuffer`/`nvMultiFenceWait`.
+
+Confirmed-good NvGraphicBuffer values: `magic=0xDAFFCAFF`, `pid=42`, `usage=0xb00`,
+`color_format=NvColorFormat_A8B8G8R8(0x0100532120)`, `block_height_log2`=NIL `tiling.y_log2` (NIL's value,
+not libnx's fixed 4), `stride`(px)=`row_stride_B/4`. A CPU-copy fallback is kept (logs
+`[wsi] zero-copy ENABLED` vs `FAILED`). Next perf front = cut Dawn (A2, raises the CPU-bound baseline).
+
+---
 
 ---
 
