@@ -111,7 +111,7 @@ When traces show `type=6` or `wgpu_backend=1`, the FIRST move is `grep -n 'enum.
 - **deko3d has no runtime shader compile:** uam is a CLI tool; deko loads only prebuilt `.dksh`. Embed DKSH as a C header (see the triangle/`tri_shaders_dksh.h` + RmlUi `rml_shaders_dksh.h` pattern). This is why Phase 4 uses a precompiled DKSH cache.
 - **Applet config:** `platforms/switch/src/switch_stubs.cpp` sets `__nx_applet_type = AppletType_Application` and `__nx_heap_size = 0`. Without these → LibraryApplet → ~512MB heap → OOM.
 - **File-based logging:** `dusk_switch_log(msg)` writes to `sdmc:/dusklight.log` AND `svcOutputDebugString` (Eden captures latter, file logs are crash-safe). Define `extern "C" void dusk_switch_log(const char*);` in any TU you want to trace from.
-- **Eden log path:** `C:\Users\Guilherme\AppData\Roaming\Eden\log\eden_log.txt` (live debug stream) and `C:\Users\Guilherme\AppData\Roaming\Eden\sdmc\dusklight.log` (file from inside .nro). Use `grep -aE` (binary-safe).
+- **Eden log path:** `C:\Users\HayatoG\AppData\Roaming\Eden\log\eden_log.txt` (live debug stream) and `C:\Users\HayatoG\AppData\Roaming\Eden\sdmc\dusklight.log` (file from inside .nro). Use `grep -aE` (binary-safe).
 - **NRO production:** docker one-liner with `aarch64-none-elf-strip` + `elf2nro --icon --nacp`. See history in BUILD_STATUS.md.
 
 ## Domain references (paste these into context when needed)
