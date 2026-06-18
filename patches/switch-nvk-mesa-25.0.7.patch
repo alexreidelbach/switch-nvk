@@ -12,11 +12,126 @@ index 3b86924..f98ad96 100644
  #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
  #endif
  
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+index 5b11490..07c0fae 100644
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -69,7 +69,17 @@ nvk_mme_set_priv_reg(struct mme_builder *b)
+    struct mme_value mask = mme_load(b);
+    struct mme_value reg = mme_load(b);
+ 
+-   mme_set_priv_reg(b, value, mask, reg);
++   /* SWITCH/Horizon PATCH: privileged GR register writes via the FECS falcon
++    * (SET_FALCON04) are BLOCKED for homebrew channels — the FECS raises an error
++    * and the kernel resets the channel, so every later submit returns Timeout
++    * (0xd5c). The two init priv-writes that use this path (clear bit3 of
++    * sm_disp_ctrl 0x419f78 "FP helper loads"; clear bit14 of warp_esr_report_mask
++    * 0x419e44 "disable OOB-address exceptions") are NON-ESSENTIAL robustness
++    * tweaks per the comments above. Skip the FECS write entirely; just consume
++    * the 3 inline args so the MME arg stream stays aligned. (This mesa tree is
++    * Switch-only.) */
++   (void)value; (void)mask; (void)reg;
++   /* was: mme_set_priv_reg(b, value, mask, reg); */
+ }
+ 
+ void
+diff --git a/src/nouveau/vulkan/nvk_image.c b/src/nouveau/vulkan/nvk_image.c
+index b769c4a..8024ce0 100644
+--- a/src/nouveau/vulkan/nvk_image.c
++++ b/src/nouveau/vulkan/nvk_image.c
+@@ -24,6 +24,50 @@
+ #include "clc197.h"
+ #include "clc597.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++/* switch-nvk diagnostic: dump VkImageCreateInfo + computed plane size so we
++ * can see which descriptor blows up NIL's size compute. Goes through the
++ * winsys log sink (g_drm_shim_log_sink), which Dusklight installs in
++ * switch_stubs.cpp -> dusklight.log. */
++extern void (*g_drm_shim_log_sink)(const char *);
++static void switch_nvk_image_log(const char *msg)
++{
++   /* switch-nvk: per-image trace is OFF unless NVK_TRACE is set — the per-frame
++    * volume throttles the SD/nxlink sink and costs real fps. */
++   static int en = -1;
++   if (en < 0) en = getenv("NVK_TRACE") ? 1 : 0;
++   if (!en) return;
++   if (g_drm_shim_log_sink) g_drm_shim_log_sink(msg);
++}
++
++/* switch-nvk WSI zero-copy (A1.2): expose plane-0's NIL block-linear layout so
++ * wsi_common_switch.c can wrap the image's bound memory in an NvGraphicBuffer
++ * that the VI compositor scans out directly (kills the per-frame present memcpy
++ * the profiling found). All fields come from the image's nil_image; the matching
++ * nvmap id + size come from drm_shim_bo_nvmap_by_va() over the image's GPU VA. */
++bool nvk_switch_image_layout(VkImage _image, uint32_t *row_stride_B,
++                             uint32_t *block_height_log2, uint64_t *offset_B,
++                             uint64_t *size_B, uint8_t *pte_kind,
++                             uint64_t *gpu_va);
++bool nvk_switch_image_layout(VkImage _image, uint32_t *row_stride_B,
++                             uint32_t *block_height_log2, uint64_t *offset_B,
++                             uint64_t *size_B, uint8_t *pte_kind,
++                             uint64_t *gpu_va)
++{
++   VK_FROM_HANDLE(nvk_image, image, _image);
++   if (image == NULL || image->plane_count < 1)
++      return false;
++   const struct nil_image *nil = &image->planes[0].nil;
++   if (row_stride_B)      *row_stride_B      = nil->levels[0].row_stride_B;
++   if (block_height_log2) *block_height_log2 = nil->levels[0].tiling.y_log2;
++   if (offset_B)          *offset_B          = nil->levels[0].offset_B;
++   if (size_B)            *size_B            = nil->size_B;
++   if (pte_kind)          *pte_kind          = nil->pte_kind;
++   if (gpu_va)            *gpu_va            = image->planes[0].addr; /* bound GPU VA */
++   return true;
++}
++
+ static VkFormatFeatureFlags2
+ nvk_get_image_plane_format_features(struct nvk_physical_device *pdev,
+                                     VkFormat vk_format, VkImageTiling tiling,
+@@ -854,6 +898,26 @@ nvk_image_init(struct nvk_device *dev,
+       };
+ 
+       image->planes[plane].nil = nil_image_new(&pdev->info, &nil_info);
++
++      /* switch-nvk: dump the descriptor + resulting plane size so we can
++       * trace bogus VA allocs. Cheap (1 line per image). */
++      {
++         char b[256];
++         snprintf(b, sizeof b,
++                  "nvk_image: vk(w=%u h=%u d=%u arr=%u lvls=%u s=%u tile=%d fmt=%u usage=0x%x mod=0x%llx) "
++                  "nil(size=0x%llx align=0x%x pte_kind=%u plane=%u)\n",
++                  pCreateInfo->extent.width, pCreateInfo->extent.height,
++                  pCreateInfo->extent.depth, pCreateInfo->arrayLayers,
++                  pCreateInfo->mipLevels, pCreateInfo->samples,
++                  (int)pCreateInfo->tiling, (unsigned)pCreateInfo->format,
++                  (unsigned)pCreateInfo->usage,
++                  (unsigned long long)image->vk.drm_format_mod,
++                  (unsigned long long)image->planes[plane].nil.size_B,
++                  (unsigned)image->planes[plane].nil.align_B,
++                  (unsigned)image->planes[plane].nil.pte_kind,
++                  (unsigned)plane);
++         switch_nvk_image_log(b);
++      }
+    }
+ 
+    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
 diff --git a/src/nouveau/vulkan/nvk_instance.c b/src/nouveau/vulkan/nvk_instance.c
-index edaba41..efba7a5 100644
+index edaba41..b42ff46 100644
 --- a/src/nouveau/vulkan/nvk_instance.c
 +++ b/src/nouveau/vulkan/nvk_instance.c
-@@ -168,6 +168,8 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+@@ -59,6 +59,9 @@ static const struct vk_instance_extension_table instance_extensions = {
+ #endif
+ #ifndef VK_USE_PLATFORM_WIN32_KHR
+    .EXT_headless_surface = true,
++#endif
++#ifdef VK_USE_PLATFORM_VI_NN
++   .NN_vi_surface = true,
+ #endif
+    .KHR_device_group_creation = true,
+    .KHR_external_fence_capabilities = true,
+@@ -168,6 +171,8 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
        nvk_create_drm_physical_device;
     instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
  
@@ -25,7 +140,7 @@ index edaba41..efba7a5 100644
     const struct build_id_note *note =
        build_id_find_nhdr_for_addr(nvk_CreateInstance);
     if (!note) {
-@@ -183,8 +185,17 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+@@ -183,8 +188,17 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
        goto fail_init;
     }
  
@@ -44,6 +159,240 @@ index edaba41..efba7a5 100644
  
  #if DETECT_OS_ANDROID
     struct u_gralloc *u_gralloc = vk_android_init_ugralloc();
+diff --git a/src/nouveau/vulkan/nvk_physical_device.h b/src/nouveau/vulkan/nvk_physical_device.h
+index 74592db..b2e4f1f 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.h
++++ b/src/nouveau/vulkan/nvk_physical_device.h
+@@ -96,4 +96,13 @@ VkExtent2D nvk_max_shading_rate(const struct nvk_physical_device *pdev,
+ #define NVK_USE_WSI_PLATFORM
+ #endif
+ 
++/* Switch (libnx) has no X11/Wayland/KMS-DRM platform, but wsi_common_headless.c
++ * is always compiled on non-Windows, so VK_EXT_headless_surface is available.
++ * Enable the WSI machinery (KHR_surface + the physical-device surface queries +
++ * swapchain image paths) so a real VkSurface/VkSwapchain works over the headless
++ * surface (present scanned out via the libnx framebuffer by the app). */
++#ifdef __SWITCH__
++#define NVK_USE_WSI_PLATFORM
++#endif
++
+ #endif
+diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
+index b8571c0..1683c7e 100644
+--- a/src/nouveau/vulkan/nvk_queue.c
++++ b/src/nouveau/vulkan/nvk_queue.c
+@@ -19,6 +19,23 @@
+ #include "nv_push_clc3c0.h"
+ #include "nv_push_clc397.h"
+ 
++/* Switch port: temporary diagnostic into the app's drm_shim log sink. REMOVE. */
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++extern void (*g_drm_shim_log_sink)(const char *);
++static void qe_log(const char *fmt, ...)
++{
++   /* switch-nvk: per-submit nvk_exec trace is OFF unless NVK_TRACE is set —
++    * it fires ~10x/frame and the SD/nxlink writes throttle the frame rate. */
++   static int en = -1;
++   if (en < 0) en = getenv("NVK_TRACE") ? 1 : 0;
++   if (!en || !g_drm_shim_log_sink) return;
++   char b[200]; va_list ap; va_start(ap, fmt);
++   vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
++   g_drm_shim_log_sink(b);
++}
++
+ static VkResult
+ nvk_queue_submit_simple(struct nvk_queue *queue,
+                         uint32_t dw_count, const uint32_t *dw);
+@@ -276,13 +293,18 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
+ 
+    const bool sync = pdev->debug_flags & NVK_DEBUG_PUSH_SYNC;
+ 
++   qe_log("nvk_exec: enter cb=%u wait=%u sig=%u\n",
++          submit->command_buffer_count, submit->wait_count, submit->signal_count);
++
+    if (submit->command_buffer_count > 0) {
+       result = nvk_queue_state_update(queue, &queue->state);
++      qe_log("nvk_exec: state_update -> %d\n", result);
+       if (result != VK_SUCCESS)
+          return result;
+ 
+       uint64_t upload_time_point;
+       result = nvk_upload_queue_flush(dev, &dev->upload, &upload_time_point);
++      qe_log("nvk_exec: upload_flush -> %d tp=%llu\n", result, (unsigned long long)upload_time_point);
+       if (result != VK_SUCCESS)
+          return result;
+ 
+@@ -292,17 +314,22 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
+             .stage_mask = ~0,
+             .wait_value = upload_time_point,
+          };
++         qe_log("nvk_exec: ctx_wait(upload tp=%llu)...\n", (unsigned long long)upload_time_point);
+          result = nvkmd_ctx_wait(queue->exec_ctx, &queue->vk.base, 1, &wait);
++         qe_log("nvk_exec: ctx_wait(upload) -> %d\n", result);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+    }
+ 
++   qe_log("nvk_exec: ctx_wait(waits=%u)...\n", submit->wait_count);
+    result = nvkmd_ctx_wait(queue->exec_ctx, &queue->vk.base,
+                            submit->wait_count, submit->waits);
++   qe_log("nvk_exec: ctx_wait(waits) -> %d\n", result);
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
++   qe_log("nvk_exec: exec loop start (%u cbufs)\n", submit->command_buffer_count);
+    for (unsigned i = 0; i < submit->command_buffer_count; i++) {
+       struct nvk_cmd_buffer *cmd =
+          container_of(submit->command_buffers[i], struct nvk_cmd_buffer, vk);
+@@ -332,8 +359,10 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
+          goto fail;
+    }
+ 
++   qe_log("nvk_exec: execs done; ctx_signal(sig=%u)...\n", submit->signal_count);
+    result = nvkmd_ctx_signal(queue->exec_ctx, &queue->vk.base,
+                              submit->signal_count, submit->signals);
++   qe_log("nvk_exec: ctx_signal -> %d\n", result);
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+diff --git a/src/nouveau/vulkan/nvk_wsi.c b/src/nouveau/vulkan/nvk_wsi.c
+index deaecb7..3b9a519 100644
+--- a/src/nouveau/vulkan/nvk_wsi.c
++++ b/src/nouveau/vulkan/nvk_wsi.c
+@@ -32,8 +32,19 @@ nvk_init_wsi(struct nvk_physical_device *pdev)
+       return result;
+ 
+    pdev->wsi_device.supports_scanout = false;
++   /* Switch: the libnx winsys has no dma-buf/PRIME or DRM-format-modifier export,
++    * so force modifiers OFF — the (always-compiled) headless WSI must allocate
++    * plain optimal images, not modifier/dma-buf images. */
++#ifdef __SWITCH__
++   pdev->wsi_device.supports_modifiers = false;
++   /* No KHR_present_wait timeline-semaphore present path on our winsys — the
++    * common wsi_CreateSwapchainKHR creates a TIMELINE semaphore when this is set,
++    * which our winsys can't back, failing swapchain creation. */
++   pdev->wsi_device.khr_present_wait = false;
++#else
+    pdev->wsi_device.supports_modifiers =
+       pdev->vk.supported_extensions.table.EXT_image_drm_format_modifier;
++#endif
+ 
+    pdev->vk.wsi_device = &pdev->wsi_device;
+ 
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
+index d4eb882..1c4da02 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
+@@ -36,11 +36,14 @@ VkResult nvkmd_nouveau_try_create_pdev(struct _drmDevice *drm_device,
+                                        enum nvk_debug debug_flags,
+                                        struct nvkmd_pdev **pdev_out);
+ 
+-#define NVKMD_NOUVEAU_HEAP_START ((uint64_t)4096)
+-#define NVKMD_NOUVEAU_HEAP_END ((uint64_t)(1ull << 38))
++/* switch-nvk: libnx's nvgpu address space only accepts fixed VA reservations in
++ * roughly [1<<34, 1<<38). NVK allocates from the top of this heap, so keep the
++ * whole heap (and the replay heap) inside that window instead of the upstream
++ * [4 KiB, 256 GiB] which lands outside nvgpu's mappable VA. */
++#define NVKMD_NOUVEAU_HEAP_START ((uint64_t)(1ull << 34))   /* 16 GiB */
++#define NVKMD_NOUVEAU_HEAP_END ((uint64_t)(1ull << 37))     /* 128 GiB */
+ #define NVKMD_NOUVEAU_REPLAY_HEAP_START NVKMD_NOUVEAU_HEAP_END
+-#define NVKMD_NOUVEAU_REPLAY_HEAP_END \
+-   ((uint64_t)NOUVEAU_WS_DEVICE_KERNEL_RESERVATION_START)
++#define NVKMD_NOUVEAU_REPLAY_HEAP_END ((uint64_t)(0x3f00000000ull)) /* ~252 GiB */
+ 
+ struct nvkmd_nouveau_dev {
+    struct nvkmd_dev base;
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
+index 1b35081..1e00f1e 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
+@@ -47,6 +47,30 @@ nvkmd_nouveau_create_dev(struct nvkmd_pdev *_pdev,
+ 
+    simple_mtx_init(&dev->heap_mutex, mtx_plain);
+ 
++#ifdef __SWITCH__
++   /* switch-nvk: Tegra's nvgpu only honors a FIXED GPU-VA map inside a region
++    * previously reserved non-fixed. The winsys shim reserves one big small-page
++    * VA arena at nv-up; point NVK's VA heap entirely inside it so every bind is
++    * a fixed map within that reservation. (Upstream's [4 KiB, 256 GiB] heap
++    * lands outside nvgpu's mappable VA and -EINVALs.) */
++   {
++      extern uint64_t drm_shim_va_base(uint64_t *size_out);
++      uint64_t arena_size = 0;
++      uint64_t arena_base = drm_shim_va_base(&arena_size);
++      if (arena_base == 0 || arena_size < (16ull << 20)) {
++         nouveau_ws_device_destroy(dev->ws_dev);
++         FREE(dev);
++         return vk_errorf(log_obj, VK_ERROR_INITIALIZATION_FAILED,
++                          "switch-nvk: no GPU VA arena reserved");
++      }
++      uint64_t replay_size = arena_size / 8;
++      uint64_t main_size = arena_size - replay_size;
++      dev->base.va_start = arena_base;
++      dev->base.va_end = arena_base + arena_size;
++      util_vma_heap_init(&dev->heap, arena_base, main_size);
++      util_vma_heap_init(&dev->replay_heap, arena_base + main_size, replay_size);
++   }
++#else
+    STATIC_ASSERT(NVKMD_NOUVEAU_HEAP_START < NVKMD_NOUVEAU_HEAP_END);
+    util_vma_heap_init(&dev->heap, NVKMD_NOUVEAU_HEAP_START,
+                       NVKMD_NOUVEAU_HEAP_END - NVKMD_NOUVEAU_HEAP_START);
+@@ -56,6 +80,7 @@ nvkmd_nouveau_create_dev(struct nvkmd_pdev *_pdev,
+    util_vma_heap_init(&dev->replay_heap,
+       NVKMD_NOUVEAU_REPLAY_HEAP_START,
+       NVKMD_NOUVEAU_REPLAY_HEAP_END - NVKMD_NOUVEAU_REPLAY_HEAP_START);
++#endif
+ 
+    *dev_out = &dev->base;
+ 
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
+index 922215d..fa3f63d 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
+@@ -13,6 +13,19 @@
+ #include <stdio.h>
+ #include <xf86drm.h>
+ 
++/* switch-nvk diagnostic: report VA-heap exhaustion (the requested size) through
++ * the winsys shim's log sink so it lands in the app log. */
++extern void (*g_drm_shim_log_sink)(const char *);
++static void shim_va_log(const char *heap, uint64_t size_B, uint64_t align_B)
++{
++   if (!g_drm_shim_log_sink)
++      return;
++   char b[128];
++   snprintf(b, sizeof b, "nvkmd: VA alloc FAILED heap=%s size=0x%llx align=0x%llx\n",
++            heap, (unsigned long long)size_B, (unsigned long long)align_B);
++   g_drm_shim_log_sink(b);
++}
++
+ static VkResult MUST_CHECK
+ alloc_heap_addr_locked(struct nvkmd_nouveau_dev *dev,
+                        struct vk_object_base *log_obj,
+@@ -44,14 +57,18 @@ alloc_heap_addr_locked(struct nvkmd_nouveau_dev *dev,
+       *addr_out = fixed_addr;
+    } else if (flags & NVKMD_VA_REPLAY) {
+       *addr_out = util_vma_heap_alloc(&dev->replay_heap, size_B, align_B);
+-      if (*addr_out == 0)
++      if (*addr_out == 0) {
++         shim_va_log("replay", size_B, align_B);   /* switch-nvk diagnostic */
+          return vk_errorf(log_obj, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                           "Failed to allocate virtual address range");
++      }
+    } else {
+       *addr_out = util_vma_heap_alloc(&dev->heap, size_B, align_B);
+-      if (*addr_out == 0)
++      if (*addr_out == 0) {
++         shim_va_log("main", size_B, align_B);      /* switch-nvk diagnostic */
+          return vk_errorf(log_obj, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                           "Failed to allocate virtual address range");
++      }
+    }
+ 
+    return VK_SUCCESS;
 diff --git a/src/util/detect_os.h b/src/util/detect_os.h
 index 86286df..4998c34 100644
 --- a/src/util/detect_os.h
@@ -156,6 +505,19 @@ index 9d34ae4..4908404 100644
  endif
  
  if with_platform_android
+diff --git a/src/vulkan/runtime/vk_image.c b/src/vulkan/runtime/vk_image.c
+index ac22917..fd3dc4e 100644
+--- a/src/vulkan/runtime/vk_image.c
++++ b/src/vulkan/runtime/vk_image.c
+@@ -96,7 +96,7 @@ vk_image_init(struct vk_device *device,
+       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
+    image->wsi_legacy_scanout = wsi_info && wsi_info->scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_HORIZON
+    image->drm_format_mod = ((1ULL << 56) - 1) /* DRM_FORMAT_MOD_INVALID */;
+ #endif
+ 
 diff --git a/src/vulkan/runtime/vk_image.h b/src/vulkan/runtime/vk_image.h
 index 71dadab..03adbbc 100644
 --- a/src/vulkan/runtime/vk_image.h
@@ -169,37 +531,909 @@ index 71dadab..03adbbc 100644
     /* VK_EXT_drm_format_modifier
      *
      * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
-
---- a/src/nouveau/vulkan/nvk_cmd_draw.c
-+++ b/src/nouveau/vulkan/nvk_cmd_draw.c
-@@ -69,7 +69,17 @@
-    struct mme_value mask = mme_load(b);
-    struct mme_value reg = mme_load(b);
+diff --git a/src/vulkan/runtime/vk_instance.c b/src/vulkan/runtime/vk_instance.c
+index ff72f59..b183945 100644
+--- a/src/vulkan/runtime/vk_instance.c
++++ b/src/vulkan/runtime/vk_instance.c
+@@ -405,6 +405,17 @@ enumerate_drm_physical_devices_locked(struct vk_instance *instance)
+    drmDevicePtr devices[256];
+    int max_devices = drmGetDevices2(0, devices, ARRAY_SIZE(devices));
  
--   mme_set_priv_reg(b, value, mask, reg);
-+   /* SWITCH/Horizon PATCH: privileged GR register writes via the FECS falcon
-+    * (SET_FALCON04) are BLOCKED for homebrew channels — the FECS raises an error
-+    * and the kernel resets the channel, so every later submit returns Timeout
-+    * (0xd5c). The two init priv-writes that use this path (clear bit3 of
-+    * sm_disp_ctrl 0x419f78 "FP helper loads"; clear bit14 of warp_esr_report_mask
-+    * 0x419e44 "disable OOB-address exceptions") are NON-ESSENTIAL robustness
-+    * tweaks per the comments above. Skip the FECS write entirely; just consume
-+    * the 3 inline args so the MME arg stream stays aligned. (This mesa tree is
-+    * Switch-only.) */
-+   (void)value; (void)mask; (void)reg;
-+   /* was: mme_set_priv_reg(b, value, mask, reg); */
- }
++   /* TEMP diagnostic (switch-nvk). */
++   {
++      extern void (*g_drm_shim_log_sink)(const char *);
++      if (g_drm_shim_log_sink) {
++         char b[96];
++         snprintf(b, sizeof b, "vk_instance: &drmGetDevices2=%p ret=%d\n",
++                  (void *)drmGetDevices2, max_devices);
++         g_drm_shim_log_sink(b);
++      }
++   }
++
+    if (max_devices < 1)
+       return VK_SUCCESS;
  
- void
-
---- a/src/vulkan/runtime/vk_image.c
-+++ b/src/vulkan/runtime/vk_image.c
-@@ -96,7 +96,7 @@
-       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
-    image->wsi_legacy_scanout = wsi_info && wsi_info->scanout;
+@@ -433,6 +444,16 @@ enumerate_drm_physical_devices_locked(struct vk_instance *instance)
+ static VkResult
+ enumerate_physical_devices_locked(struct vk_instance *instance)
+ {
++   /* TEMP diagnostic (switch-nvk): report which enumeration path runs. */
++   extern void (*g_drm_shim_log_sink)(const char *);
++   if (g_drm_shim_log_sink) {
++      g_drm_shim_log_sink(instance->physical_devices.enumerate
++         ? "vk_instance: enumerate_cb SET\n" : "vk_instance: enumerate_cb NULL\n");
++      g_drm_shim_log_sink(instance->physical_devices.try_create_for_drm
++         ? "vk_instance: try_create_for_drm SET -> drm path\n"
++         : "vk_instance: try_create_for_drm NULL -> NO drm path\n");
++   }
++
+    if (instance->physical_devices.enumerate) {
+       VkResult result = instance->physical_devices.enumerate(instance);
+       if (result != VK_ERROR_INCOMPATIBLE_DRIVER)
+diff --git a/src/vulkan/wsi/meson.build b/src/vulkan/wsi/meson.build
+index 6933eb7..27c766b 100644
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -31,6 +31,11 @@ else
+   files_vulkan_wsi += files('wsi_common_headless.c')
+ endif
  
--#if DETECT_OS_LINUX || DETECT_OS_BSD
-+#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_HORIZON
-    image->drm_format_mod = ((1ULL << 56) - 1) /* DRM_FORMAT_MOD_INVALID */;
++# Switch (libnx) VI/nwindow WSI backend — VK_NN_vi_surface.
++if host_machine.system() == 'horizon'
++  files_vulkan_wsi += files('wsi_common_switch.c')
++endif
++
+ if with_platform_macos
+   files_vulkan_wsi += files('wsi_common_metal.c', 'wsi_common_metal_layer.m')
+ endif
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index 120aa06..11a3b08 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -248,6 +248,12 @@ wsi_device_init(struct wsi_device *wsi,
+       goto fail;
  #endif
  
++#ifdef VK_USE_PLATFORM_VI_NN
++   result = wsi_switch_init_wsi(wsi, alloc, pdevice);
++   if (result != VK_SUCCESS)
++      goto fail;
++#endif
++
+    present_mode = getenv("MESA_VK_WSI_PRESENT_MODE");
+    if (present_mode) {
+       if (!strcmp(present_mode, "fifo")) {
+@@ -309,6 +315,9 @@ wsi_device_finish(struct wsi_device *wsi,
+ {
+ #ifndef VK_USE_PLATFORM_WIN32_KHR
+    wsi_headless_finish_wsi(wsi, alloc);
++#ifdef VK_USE_PLATFORM_VI_NN
++   wsi_switch_finish_wsi(wsi, alloc);
++#endif
+ #endif
+ #ifdef VK_USE_PLATFORM_DISPLAY_KHR
+    wsi_display_finish_wsi(wsi, alloc);
+@@ -971,6 +980,21 @@ wsi_GetPhysicalDevicePresentRectanglesKHR(VkPhysicalDevice physicalDevice,
+                                         pRectCount, pRects);
+ }
+ 
++/* Switch port: temporary diagnostic into the app's drm_shim log sink. REMOVE. */
++#include <stdarg.h>
++extern void (*g_drm_shim_log_sink)(const char *);
++static void sc_log(const char *fmt, ...)
++{
++   /* switch-nvk: per-present [wsi] qp trace is OFF unless NVK_TRACE is set —
++    * the per-frame SD/nxlink writes throttle the frame rate (see profiling). */
++   static int en = -1;
++   if (en < 0) en = getenv("NVK_TRACE") ? 1 : 0;
++   if (!en || !g_drm_shim_log_sink) return;
++   char b[256]; va_list ap; va_start(ap, fmt);
++   vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
++   g_drm_shim_log_sink(b);
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ wsi_CreateSwapchainKHR(VkDevice _device,
+                        const VkSwapchainCreateInfoKHR *pCreateInfo,
+@@ -1009,6 +1033,8 @@ wsi_CreateSwapchainKHR(VkDevice _device,
+    VkResult result = iface->create_swapchain(surface, _device, wsi_device,
+                                              &info, alloc,
+                                              &swapchain);
++   sc_log("[wsi] iface->create_swapchain -> %d (present_wait=%d blit.queue=%p)\n",
++          result, wsi_device->khr_present_wait, result == VK_SUCCESS ? (void*)swapchain->blit.queue : NULL);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+@@ -1017,6 +1043,7 @@ wsi_CreateSwapchainKHR(VkDevice _device,
+                                  sizeof (*swapchain->fences),
+                                  VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (!swapchain->fences) {
++      sc_log("[wsi] FAIL: fences alloc\n");
+       swapchain->destroy(swapchain, alloc);
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+@@ -1035,6 +1062,7 @@ wsi_CreateSwapchainKHR(VkDevice _device,
+ 
+       /* We assume here that a driver exposing present_wait also exposes VK_KHR_timeline_semaphore. */
+       result = wsi_device->CreateSemaphore(_device, &sem_info, alloc, &swapchain->present_id_timeline);
++      sc_log("[wsi] present_wait timeline semaphore -> %d\n", result);
+       if (result != VK_SUCCESS) {
+          swapchain->destroy(swapchain, alloc);
+          return VK_ERROR_OUT_OF_HOST_MEMORY;
+@@ -1047,12 +1075,14 @@ wsi_CreateSwapchainKHR(VkDevice _device,
+                                          sizeof (*swapchain->blit.semaphores),
+                                          VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+       if (!swapchain->blit.semaphores) {
++         sc_log("[wsi] FAIL: blit.semaphores alloc\n");
+          wsi_device->DestroySemaphore(_device, swapchain->present_id_timeline, alloc);
+          swapchain->destroy(swapchain, alloc);
+          return VK_ERROR_OUT_OF_HOST_MEMORY;
+       }
+    }
+ 
++   sc_log("[wsi] CreateSwapchainKHR OK\n");
+    *pSwapchain = wsi_swapchain_to_handle(swapchain);
+ 
+    return VK_SUCCESS;
+@@ -1420,9 +1450,11 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+          }
+       } else {
+          MESA_TRACE_SCOPE("throttle");
++         sc_log("[wsi] qp: throttle WaitForFences(fence[%u], ~0)...\n", image_index);
+          result =
+             wsi->WaitForFences(device, 1, &swapchain->fences[image_index],
+                                true, ~0ull);
++         sc_log("[wsi] qp: throttle WaitForFences -> %d\n", result);
+          if (result != VK_SUCCESS)
+             goto fail_present;
+       }
+@@ -1534,7 +1566,10 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+          }
+       }
+ 
++      sc_log("[wsi] qp: present-internal QueueSubmit (cbufs=%u waitSem=%u)...\n",
++             submit_info.commandBufferCount, submit_info.waitSemaphoreCount);
+       result = wsi->QueueSubmit(submit_queue, 1, &submit_info, fence);
++      sc_log("[wsi] qp: present-internal QueueSubmit -> %d\n", result);
+       if (result != VK_SUCCESS)
+          goto fail_present;
+ 
+@@ -1576,7 +1611,9 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+             goto fail_present;
+       }
+ 
++      sc_log("[wsi] qp: backend queue_present...\n");
+       result = swapchain->queue_present(swapchain, image_index, present_id, region);
++      sc_log("[wsi] qp: backend queue_present -> %d\n", result);
+       if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+          goto fail_present;
+ 
+diff --git a/src/vulkan/wsi/wsi_common.h b/src/vulkan/wsi/wsi_common.h
+index fee7090..ed347a6 100644
+--- a/src/vulkan/wsi/wsi_common.h
++++ b/src/vulkan/wsi/wsi_common.h
+@@ -97,7 +97,12 @@ struct vk_instance;
+ 
+ struct driOptionCache;
+ 
++#ifdef VK_USE_PLATFORM_VI_NN
++/* Switch: VK_ICD_WSI_PLATFORM_VI (12) is past METAL — size the wsi[] array for it. */
++#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)
++#else
+ #define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)
++#endif
+ 
+ struct wsi_device {
+    /* Allocator for the instance */
+diff --git a/src/vulkan/wsi/wsi_common_headless.c b/src/vulkan/wsi/wsi_common_headless.c
+index 7fff55b..95552d7 100644
+--- a/src/vulkan/wsi/wsi_common_headless.c
++++ b/src/vulkan/wsi/wsi_common_headless.c
+@@ -38,6 +38,19 @@
+ 
+ #include "drm-uapi/drm_fourcc.h"
+ 
++/* Switch port: temporary diagnostic — route headless-swapchain step logs into the
++ * app's drm_shim log sink (sdmc:/<app>.log). REMOVE before a clean re-extract. */
++#include <stdio.h>
++#include <stdarg.h>
++extern void (*g_drm_shim_log_sink)(const char *);
++static void hl_log(const char *fmt, ...)
++{
++   if (!g_drm_shim_log_sink) return;
++   char b[256]; va_list ap; va_start(ap, fmt);
++   vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
++   g_drm_shim_log_sink(b);
++}
++
+ struct wsi_headless {
+    struct wsi_interface base;
+ 
+@@ -445,6 +458,8 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
+ 
+    int num_images = pCreateInfo->minImageCount;
++   hl_log("[wsi-hl] create_swapchain: num_images=%d supports_modifiers=%d\n",
++          num_images, wsi_device->supports_modifiers);
+ 
+    size_t size = sizeof(*chain) + num_images * sizeof(chain->images[0]);
+    chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+@@ -458,6 +473,7 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+ 
+    result = wsi_swapchain_init(wsi_device, &chain->base, device,
+                                pCreateInfo, &drm_params.base, pAllocator);
++   hl_log("[wsi-hl] wsi_swapchain_init -> %d\n", result);
+    if (result != VK_SUCCESS) {
+       vk_free(pAllocator, chain);
+       return result;
+@@ -478,6 +494,7 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    for (uint32_t i = 0; i < chain->base.image_count; i++) {
+       result = wsi_create_image(&chain->base, &chain->base.image_info,
+                                 &chain->images[i].base);
++      hl_log("[wsi-hl] wsi_create_image[%u] -> %d\n", i, result);
+       if (result != VK_SUCCESS)
+          goto fail;
+ 
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index 849bdc6..9178e09 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -444,6 +444,14 @@ VkResult wsi_headless_init_wsi(struct wsi_device *wsi_device,
+ void wsi_headless_finish_wsi(struct wsi_device *wsi_device,
+                              const VkAllocationCallbacks *alloc);
+ 
++#ifdef VK_USE_PLATFORM_VI_NN
++VkResult wsi_switch_init_wsi(struct wsi_device *wsi_device,
++                             const VkAllocationCallbacks *alloc,
++                             VkPhysicalDevice physical_device);
++void wsi_switch_finish_wsi(struct wsi_device *wsi_device,
++                           const VkAllocationCallbacks *alloc);
++#endif
++
+ VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_swapchain, base, VkSwapchainKHR,
+                                VK_OBJECT_TYPE_SWAPCHAIN_KHR)
+ 
+diff --git a/src/vulkan/wsi/wsi_common_switch.c b/src/vulkan/wsi/wsi_common_switch.c
+new file mode 100644
+index 0000000..b132847
+--- /dev/null
++++ b/src/vulkan/wsi/wsi_common_switch.c
+@@ -0,0 +1,638 @@
++/*
++ * wsi_common_switch.c — VK_NN_vi_surface WSI backend for the Nintendo Switch,
++ * presenting through libnx `nwindow` (the VI compositor). Mirrors the structure
++ * of wsi_common_headless.c (same wsi_interface contract) and the design reverse-
++ * engineered from Dan/Tiicu's wsi_common_switch.c (see D:\switch-nvk\dan-re\RE_NOTES.md).
++ *
++ * Model (validated against Dan's NROs):
++ *   surface  = vkCreateViSurfaceNN(window = nwindowGetDefault())  -> VkIcdSurfaceVi
++ *   caps     = RGBA8/BGRA8, FIFO, <=4 images, extent from nwindowGetDimensions
++ *   swapchain= per image: a renderable VkImage + a libnx nvmap buffer registered
++ *              with the nwindow (nwindowConfigureBuffer); slot i = image i.
++ *   acquire  = nwindowDequeueBuffer -> slot -> image; cancel+OUT_OF_DATE if unknown
++ *   present  = copy rendered image -> the nwindow buffer, nwindowQueueBuffer(slot)
++ *
++ * First milestone (correctness-first): CPU-copy present + LINEAR nwindow buffers
++ * (no block-linear/GOB matching). Optimize to zero-copy (kind=0xfe block-linear,
++ * native-fence present) once pixels are proven.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "util/macros.h"
++#include "util/u_thread.h"
++#include "vk_util.h"
++#include "vk_instance.h"
++#include "vk_physical_device.h"
++#include "wsi_common_entrypoints.h"
++#include "wsi_common_private.h"
++
++#include <vulkan/vulkan_vi.h>   /* VkViSurfaceCreateInfoNN (needs VK_USE_PLATFORM_VI_NN) */
++#include <switch.h>
++#include <stdio.h>              /* snprintf for the present-path profiler */
++
++/* VkIcdSurfaceVi { VkIcdSurfaceBase base; void *window; } is defined by vk_icd.h.
++ * .window holds the libnx NWindow* (cast on use). */
++
++/* Present-path profiler sink. Dusklight defines a strong extern "C" dusk_switch_log
++ * (writes sdmc:/dusklight.log, pulled over FTP). The weak no-op fallback keeps the
++ * standalone smoke NROs (which don't link Dusklight) building/linking unchanged. */
++void dusk_switch_log(const char *msg);
++__attribute__((weak)) void dusk_switch_log(const char *msg) { (void)msg; }
++
++/* ---- A1 zero-copy present (block-linear, kind=0xfe) ------------------------
++ * Helpers from the winsys (drm_shim.c) and the NVK driver (nvk_image.c). The
++ * VI compositor scans out the rendered block-linear image directly: present =
++ * nwindowQueueBuffer, no per-frame CPU copy/swizzle. Recipe = Dan-RE
++ * FUN_71000f2c00 + dan-re/RE_NOTES.md §131-178. */
++extern bool drm_shim_bo_nvmap_by_va(uint64_t gpu_va, uint32_t *out_nvmap_id,
++                                    uint64_t *out_size, uint32_t *out_kind);
++extern bool nvk_switch_image_layout(VkImage image, uint32_t *row_stride_B,
++                                    uint32_t *block_height_log2, uint64_t *offset_B,
++                                    uint64_t *size_B, uint8_t *pte_kind,
++                                    uint64_t *gpu_va);
++
++/* Fill `gb` so nwindowConfigureBuffer registers `image`'s block-linear memory as
++ * a scanout buffer. Returns false if the NIL layout / nvmap can't be resolved
++ * (caller falls back). memset 0 then set the documented fields; libnx overwrites
++ * the NativeHandle header + trailing bookkeeping during marshalling. */
++static bool
++wsi_switch_build_graphic_buffer(NvGraphicBuffer *gb, VkImage image,
++                                VkFormat vk_format, VkExtent2D extent)
++{
++   uint32_t row_stride_B = 0, block_height_log2 = 0, bo_kind = 0, nvmap_id = 0;
++   uint64_t offset_B = 0, nil_size_B = 0, gpu_va = 0, bo_size = 0;
++   uint8_t  pte_kind = 0;
++
++   if (!nvk_switch_image_layout(image, &row_stride_B, &block_height_log2,
++                                &offset_B, &nil_size_B, &pte_kind, &gpu_va))
++      return false;
++   if (!drm_shim_bo_nvmap_by_va(gpu_va, &nvmap_id, &bo_size, &bo_kind))
++      return false;
++
++   const bool bgra = (vk_format == VK_FORMAT_B8G8R8A8_UNORM);
++   memset(gb, 0, sizeof(*gb));
++   /* NativeHandle: num_ints = count of u32 words after the handle. WITHOUT this the
++    * marshalled GraphicBuffer is empty -> bqSetPreallocatedBuffer "succeeds" but
++    * bqDequeueBuffer returns WouldBlock forever (the dequeue-hang bug). Mirrors libnx
++    * framebufferCreate. */
++   gb->header.num_fds  = 0;
++   gb->header.num_ints = (sizeof(NvGraphicBuffer) - sizeof(NativeHandle)) / 4;
++   gb->unk0        = -1;
++   gb->nvmap_id    = (s32)nvmap_id;
++   gb->magic       = 0xDAFFCAFF;
++   gb->pid         = 42;
++   gb->usage       = 0xb00;                 /* GRALLOC scanout usage (Dan RE §5.2) */
++   gb->format      = bgra ? PIXEL_FORMAT_BGRA_8888 : PIXEL_FORMAT_RGBA_8888;
++   gb->ext_format  = gb->format;
++   gb->stride      = row_stride_B / 4;       /* RGBA8 = 4 B/px; field is in PIXELS  */
++   gb->total_size  = (u32)nil_size_B;
++   gb->num_planes  = 1;
++   gb->planes[0].width             = extent.width;
++   gb->planes[0].height            = extent.height;
++   gb->planes[0].color_format      = bgra ? NvColorFormat_A8R8G8B8 : NvColorFormat_A8B8G8R8;
++   gb->planes[0].layout            = NvLayout_BlockLinear;    /* = 3                  */
++   gb->planes[0].pitch             = row_stride_B;
++   gb->planes[0].offset            = (u32)offset_B;
++   gb->planes[0].kind              = NvKind_Generic_16BX2;    /* = 0xfe, display kind */
++   gb->planes[0].block_height_log2 = block_height_log2;
++   gb->planes[0].scan              = NvDisplayScanFormat_Progressive;
++   gb->planes[0].size              = nil_size_B;
++   printf("[wsi-zc] gb: nvmap=%u stride_px=%u pitch_B=%u bh_log2=%u size=%llu pte_kind=%u gpu_va=0x%llx\n",
++          nvmap_id, gb->stride, row_stride_B, block_height_log2,
++          (unsigned long long)nil_size_B, pte_kind, (unsigned long long)gpu_va);
++   fflush(stdout);
++   return true;
++}
++
++/* ---- surface ---- */
++
++struct wsi_switch {
++   struct wsi_interface base;
++   struct wsi_device *wsi;
++   const VkAllocationCallbacks *alloc;
++   VkPhysicalDevice physical_device;
++};
++
++VKAPI_ATTR VkResult VKAPI_CALL
++wsi_CreateViSurfaceNN(VkInstance _instance,
++                      const VkViSurfaceCreateInfoNN *pCreateInfo,
++                      const VkAllocationCallbacks *pAllocator,
++                      VkSurfaceKHR *pSurface)
++{
++   VK_FROM_HANDLE(vk_instance, instance, _instance);
++   VkIcdSurfaceVi *surface;
++
++   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN);
++
++   surface = vk_alloc2(&instance->alloc, pAllocator, sizeof(*surface), 8,
++                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   if (surface == NULL)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   surface->base.platform = VK_ICD_WSI_PLATFORM_VI;
++   surface->window = (void *)pCreateInfo->window;
++
++   *pSurface = VkIcdSurfaceBase_to_handle(&surface->base);
++   return VK_SUCCESS;
++}
++
++/* ---- query callbacks ---- */
++
++static VkResult
++wsi_switch_surface_get_support(VkIcdSurfaceBase *surface,
++                               struct wsi_device *wsi_device,
++                               uint32_t queueFamilyIndex,
++                               VkBool32 *pSupported)
++{
++   *pSupported = true;
++   return VK_SUCCESS;
++}
++
++static const VkPresentModeKHR present_modes[] = {
++   VK_PRESENT_MODE_FIFO_KHR,
++};
++
++static VkResult
++wsi_switch_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
++                                    struct wsi_device *wsi_device,
++                                    VkSurfaceCapabilitiesKHR *caps)
++{
++   VkIcdSurfaceVi *surface = (VkIcdSurfaceVi *)icd_surface;
++   u32 w = 1280, h = 720;
++   if (surface->window != NULL)
++      nwindowGetDimensions((NWindow *)surface->window, &w, &h);
++
++   caps->minImageCount = 2;
++   caps->maxImageCount = 4;
++   caps->currentExtent = (VkExtent2D){ w, h };
++   caps->minImageExtent = (VkExtent2D){ 1, 1 };
++   caps->maxImageExtent = (VkExtent2D){ w, h };
++   caps->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++   caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++   caps->maxImageArrayLayers = 1;
++   caps->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++   caps->supportedUsageFlags = wsi_caps_get_image_usage();
++   return VK_SUCCESS;
++}
++
++static VkResult
++wsi_switch_surface_get_capabilities2(VkIcdSurfaceBase *surface,
++                                     struct wsi_device *wsi_device,
++                                     const void *info_next,
++                                     VkSurfaceCapabilities2KHR *caps)
++{
++   assert(caps->sType == VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR);
++   VkResult result =
++      wsi_switch_surface_get_capabilities(surface, wsi_device, &caps->surfaceCapabilities);
++
++   vk_foreach_struct(ext, caps->pNext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
++         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
++         protected->supportsProtected = VK_FALSE;
++         break;
++      }
++      default:
++         break;
++      }
++   }
++   return result;
++}
++
++/* RGBA8 / BGRA8 UNORM, sRGB-nonlinear — the formats the VI compositor scans out. */
++static const VkSurfaceFormatKHR switch_formats[] = {
++   { VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
++   { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
++};
++
++static VkResult
++wsi_switch_surface_get_formats(VkIcdSurfaceBase *icd_surface,
++                               struct wsi_device *wsi_device,
++                               uint32_t *pSurfaceFormatCount,
++                               VkSurfaceFormatKHR *pSurfaceFormats)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, pSurfaceFormats, pSurfaceFormatCount);
++   for (uint32_t i = 0; i < ARRAY_SIZE(switch_formats); i++) {
++      vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) { *f = switch_formats[i]; }
++   }
++   return vk_outarray_status(&out);
++}
++
++static VkResult
++wsi_switch_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
++                                struct wsi_device *wsi_device,
++                                const void *info_next,
++                                uint32_t *pSurfaceFormatCount,
++                                VkSurfaceFormat2KHR *pSurfaceFormats)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, pSurfaceFormats, pSurfaceFormatCount);
++   for (uint32_t i = 0; i < ARRAY_SIZE(switch_formats); i++) {
++      vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
++         f->surfaceFormat = switch_formats[i];
++      }
++   }
++   return vk_outarray_status(&out);
++}
++
++static VkResult
++wsi_switch_surface_get_present_modes(VkIcdSurfaceBase *surface,
++                                     struct wsi_device *wsi_device,
++                                     uint32_t *pPresentModeCount,
++                                     VkPresentModeKHR *pPresentModes)
++{
++   if (pPresentModes == NULL) {
++      *pPresentModeCount = ARRAY_SIZE(present_modes);
++      return VK_SUCCESS;
++   }
++   *pPresentModeCount = MIN2(*pPresentModeCount, ARRAY_SIZE(present_modes));
++   typed_memcpy(pPresentModes, present_modes, *pPresentModeCount);
++   return (*pPresentModeCount < ARRAY_SIZE(present_modes)) ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++static VkResult
++wsi_switch_surface_get_present_rectangles(VkIcdSurfaceBase *icd_surface,
++                                          struct wsi_device *wsi_device,
++                                          uint32_t *pRectCount,
++                                          VkRect2D *pRects)
++{
++   VkIcdSurfaceVi *surface = (VkIcdSurfaceVi *)icd_surface;
++   u32 w = 1280, h = 720;
++   if (surface->window != NULL)
++      nwindowGetDimensions((NWindow *)surface->window, &w, &h);
++   VK_OUTARRAY_MAKE_TYPED(VkRect2D, out, pRects, pRectCount);
++   vk_outarray_append_typed(VkRect2D, &out, rect) {
++      *rect = (VkRect2D){ .offset = { 0, 0 }, .extent = { w, h } };
++   }
++   return vk_outarray_status(&out);
++}
++
++/* ---- swapchain ---- */
++
++#define WSI_SWITCH_MAX_IMAGES 4
++
++struct wsi_switch_image {
++   struct wsi_image base;
++   NvGraphicBuffer gb;        /* registered with the nwindow at slot == image index */
++   NvMultiFence acquire_fence;/* producer fence from the last dequeue of this slot   */
++   bool configured;           /* nwindowConfigureBuffer succeeded for this slot       */
++   bool busy;
++};
++
++struct wsi_switch_swapchain {
++   struct wsi_swapchain base;
++   NWindow *window;
++   bool zero_copy;          /* all images registered as nwindow scanout buffers       */
++   Framebuffer fb;          /* CPU-copy fallback path (libnx framebuffer)             */
++   bool fb_created;
++   VkExtent2D extent;
++   VkFormat vk_format;
++   uint32_t next;           /* round-robin acquire index (fallback path)              */
++   struct wsi_switch_image images[WSI_SWITCH_MAX_IMAGES];
++};
++VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_switch_swapchain, base.base, VkSwapchainKHR,
++                               VK_OBJECT_TYPE_SWAPCHAIN_KHR)
++
++/* There is a single NWindow per surface on Switch, and its scanout buffers are registered globally
++ * via nwindowConfigureBuffer. Track which swapchain currently owns that registration so a swapchain
++ * recreate (resolution / aspect change -> new extent) can release the previous owner's buffers
++ * before configuring its own. Without this the second nwindowConfigureBuffer collides with the old
++ * swapchain's still-registered buffers and returns 0xf59 (HW-confirmed crash on in-game/launcher
++ * resolution change). Vulkan creates the new swapchain before destroying the old, so the transfer
++ * happens here at create time; the old swapchain's destroy then sees it is no longer the owner and
++ * skips its own release (which would otherwise tear down the new buffers). */
++static struct wsi_switch_swapchain *g_zc_owner = NULL;
++
++static struct wsi_image *
++wsi_switch_swapchain_get_wsi_image(struct wsi_swapchain *wsi_chain, uint32_t image_index)
++{
++   struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
++   return &chain->images[image_index].base;
++}
++
++static VkResult
++wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
++                                        const VkAcquireNextImageInfoKHR *info,
++                                        uint32_t *image_index)
++{
++   struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
++
++   /* Zero-copy: dequeue a free nwindow slot (slot == image index, identity). The
++    * producer fence says when the compositor is done reading it — wait it on the
++    * CPU so the app never renders over a buffer still on screen (no tearing). */
++   if (chain->zero_copy) {
++      static uint32_t dbg = 0;
++      bool trace = (dbg++ < 4);
++      s32 slot = -1;
++      NvMultiFence mf;
++      memset(&mf, 0, sizeof(mf));
++      if (trace) { printf("[wsi-zc] acquire: dequeue...\n"); fflush(stdout); }
++      Result rc = nwindowDequeueBuffer(chain->window, &slot, &mf);
++      if (trace) { printf("[wsi-zc] acquire: dequeue -> 0x%x slot=%d\n", (unsigned)rc, slot); fflush(stdout); }
++      if (R_FAILED(rc))
++         return VK_NOT_READY;
++      if (slot < 0 || (uint32_t)slot >= chain->base.image_count) {
++         nwindowCancelBuffer(chain->window, slot, NULL);
++         return VK_ERROR_OUT_OF_DATE_KHR;
++      }
++      nvMultiFenceWait(&mf, 1000000 /* 1s */);
++      if (trace) { printf("[wsi-zc] acquire: fence waited, slot=%d ready\n", slot); fflush(stdout); }
++      chain->images[slot].acquire_fence = mf;
++      chain->images[slot].busy = true;
++      *image_index = (uint32_t)slot;
++      return VK_SUCCESS;
++   }
++
++   /* Fallback (non-zero-copy): round-robin a free render image. */
++   for (uint32_t n = 0; n < chain->base.image_count; n++) {
++      uint32_t i = (chain->next + n) % chain->base.image_count;
++      if (!chain->images[i].busy) {
++         chain->images[i].busy = true;
++         chain->next = (i + 1) % chain->base.image_count;
++         *image_index = i;
++         return VK_SUCCESS;
++      }
++   }
++   return VK_NOT_READY;
++}
++
++static VkResult
++wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
++                                   uint32_t image_index,
++                                   uint64_t present_id,
++                                   const VkPresentRegionKHR *damage)
++{
++   struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
++   struct wsi_switch_image *img = &chain->images[image_index];
++
++   /* Profiling: tick stamps per present phase. armGetSystemTick is ~19.2MHz, cheap. */
++   const u64 t_start = armGetSystemTick();
++   u64 t_fence = t_start, t_flush = t_start, t_copy = t_start;
++
++   /* Zero-copy present: the rendered block-linear image IS the nwindow buffer.
++    * Wait the render fence (the common WSI present signalled fences[image_index]),
++    * then hand the slot to the VI compositor. No CPU copy, no libnx swizzle — the
++    * GPU L2 flush in our fence cmdlist makes the block-linear writes visible to
++    * the display block directly. */
++   if (chain->zero_copy && img->configured) {
++      const struct wsi_device *wsi = chain->base.wsi;
++      if (chain->base.fences[image_index] != VK_NULL_HANDLE)
++         wsi->WaitForFences(chain->base.device, 1,
++                            &chain->base.fences[image_index], VK_TRUE, ~0ull);
++      t_fence = armGetSystemTick();             /* GPU render done                     */
++      t_flush = t_fence;                        /* no dcache flush / no copy            */
++      nwindowQueueBuffer(chain->window, (s32)image_index, NULL);
++      t_copy = armGetSystemTick();              /* nwindowQueueBuffer (VI queue) done   */
++   }
++   /* CPU-copy fallback: the rendered (host-visible) image -> the next libnx
++    * framebuffer buffer (dequeue), row by row (strides differ), then present
++    * (queue). Active only when zero-copy registration failed. */
++   else if (chain->fb_created && img->base.cpu_map != NULL) {
++      /* The common WSI present submitted the image->cpu_map blit ASYNCHRONOUSLY
++       * (signalling fences[image_index]); wait for it, then invalidate the CPU
++       * cache — GM20B is NOT IO-coherent, so a HOST_COHERENT map reads stale lines
++       * (this was the "constant pink" bug: we re-read frame 0). Then mirror into
++       * the nwindow buffer and present. */
++      const struct wsi_device *wsi = chain->base.wsi;
++      u32 src_stride = img->base.row_pitches[0];
++      u32 sz = src_stride * chain->extent.height;
++      if (chain->base.fences[image_index] != VK_NULL_HANDLE)
++         wsi->WaitForFences(chain->base.device, 1,
++                            &chain->base.fences[image_index], VK_TRUE, ~0ull);
++      t_fence = armGetSystemTick();            /* GPU render + WSI blit-to-cpu_map done */
++      armDCacheFlush((void *)(uintptr_t)img->base.cpu_map, sz);
++      t_flush = armGetSystemTick();            /* dcache flush of the whole image done */
++      u32 dst_stride = 0;
++      u8 *dst = (u8 *)framebufferBegin(&chain->fb, &dst_stride);
++      const u8 *src = (const u8 *)img->base.cpu_map;
++      u32 row_B = MIN2(dst_stride, src_stride);
++      for (u32 y = 0; y < chain->extent.height; y++)
++         memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * src_stride, row_B);
++      framebufferEnd(&chain->fb);
++      t_copy = armGetSystemTick();             /* memcpy + framebufferEnd (VI queue) done */
++   }
++
++   /* Accumulate per-phase ns; emit one averaged line every 60 presents (batched so
++    * the sdmc log write does not throttle the frame rate — see heuristics #9/#21). */
++   {
++      static u64 acc_fence = 0, acc_flush = 0, acc_copy = 0, acc_total = 0;
++      static u64 last_start = 0, acc_interval = 0;
++      static u32 nframes = 0, nintervals = 0;
++      acc_fence += armTicksToNs(t_fence - t_start);
++      acc_flush += armTicksToNs(t_flush - t_fence);
++      acc_copy  += armTicksToNs(t_copy  - t_flush);
++      acc_total += armTicksToNs(t_copy  - t_start);
++      if (last_start != 0) { acc_interval += armTicksToNs(t_start - last_start); nintervals++; }
++      last_start = t_start;
++      if (++nframes >= 60) {
++         unsigned long long fps = (acc_interval != 0)
++            ? (1000000000ull * (unsigned long long)nintervals) / (unsigned long long)acc_interval : 0;
++         char buf[256];
++         snprintf(buf, sizeof buf,
++            "[wsi-prof] over %u presents (avg us): fence/GPU=%llu dcacheflush=%llu memcpy+queue=%llu "
++            "present_total=%llu | frame_interval=%llu (~%llu fps)",
++            nframes,
++            (unsigned long long)(acc_fence / nframes / 1000),
++            (unsigned long long)(acc_flush / nframes / 1000),
++            (unsigned long long)(acc_copy  / nframes / 1000),
++            (unsigned long long)(acc_total / nframes / 1000),
++            nintervals ? (unsigned long long)(acc_interval / nintervals / 1000) : 0ull,
++            fps);
++         dusk_switch_log(buf);
++         acc_fence = acc_flush = acc_copy = acc_total = acc_interval = 0;
++         nframes = nintervals = 0;
++      }
++   }
++
++   img->busy = false;
++   return VK_SUCCESS;
++}
++
++static VkResult
++wsi_switch_swapchain_release_images(struct wsi_swapchain *wsi_chain,
++                                    uint32_t count, const uint32_t *indices)
++{
++   struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
++   for (uint32_t i = 0; i < count; i++)
++      chain->images[indices[i]].busy = false;
++   return VK_SUCCESS;
++}
++
++static VkResult
++wsi_switch_swapchain_destroy(struct wsi_swapchain *wsi_chain,
++                             const VkAllocationCallbacks *pAllocator)
++{
++   struct wsi_switch_swapchain *chain = (struct wsi_switch_swapchain *)wsi_chain;
++   if (chain->zero_copy && g_zc_owner == chain) {
++      nwindowReleaseBuffers(chain->window);
++      g_zc_owner = NULL;
++   }
++   if (chain->fb_created)
++      framebufferClose(&chain->fb);
++   for (uint32_t i = 0; i < chain->base.image_count; i++) {
++      if (chain->images[i].base.image != VK_NULL_HANDLE)
++         wsi_destroy_image(&chain->base, &chain->images[i].base);
++   }
++   wsi_swapchain_finish(&chain->base);
++   vk_free(pAllocator, chain);
++   return VK_SUCCESS;
++}
++
++static VkResult
++wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
++                                    VkDevice device,
++                                    struct wsi_device *wsi_device,
++                                    const VkSwapchainCreateInfoKHR *pCreateInfo,
++                                    const VkAllocationCallbacks *pAllocator,
++                                    struct wsi_swapchain **swapchain_out)
++{
++   VkIcdSurfaceVi *surface = (VkIcdSurfaceVi *)icd_surface;
++   struct wsi_switch_swapchain *chain;
++   VkResult result;
++
++   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
++
++   uint32_t num_images = pCreateInfo->minImageCount;
++   if (num_images > WSI_SWITCH_MAX_IMAGES)
++      num_images = WSI_SWITCH_MAX_IMAGES;
++
++   size_t size = sizeof(*chain);
++   chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   if (chain == NULL)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   /* Renderable images via the common WSI buffer-blit path (host-visible blit
++    * buffer per image => img->base.cpu_map is the rendered pixels we mirror). */
++   struct wsi_cpu_image_params image_params = {
++      .base.image_type = WSI_IMAGE_TYPE_CPU,
++   };
++   result = wsi_swapchain_init(wsi_device, &chain->base, device,
++                               pCreateInfo, &image_params.base, pAllocator);
++   if (result != VK_SUCCESS) {
++      vk_free(pAllocator, chain);
++      return result;
++   }
++
++   chain->base.destroy = wsi_switch_swapchain_destroy;
++   chain->base.get_wsi_image = wsi_switch_swapchain_get_wsi_image;
++   chain->base.acquire_next_image = wsi_switch_swapchain_acquire_next_image;
++   chain->base.queue_present = wsi_switch_swapchain_queue_present;
++   chain->base.release_images = wsi_switch_swapchain_release_images;
++   chain->base.present_mode = VK_PRESENT_MODE_FIFO_KHR;
++   chain->base.image_count = num_images;
++   chain->window = (NWindow *)surface->window;
++   chain->extent = pCreateInfo->imageExtent;
++   chain->vk_format = pCreateInfo->imageFormat;
++
++   for (uint32_t i = 0; i < num_images; i++) {
++      result = wsi_create_image(&chain->base, &chain->base.image_info,
++                                &chain->images[i].base);
++      if (result != VK_SUCCESS)
++         goto fail;
++      chain->images[i].busy = false;
++   }
++
++   /* ZERO-COPY: register each rendered block-linear image directly as an nwindow
++    * scanout buffer (build the NvGraphicBuffer with kind=0xfe + the image's NIL
++    * layout, then nwindowConfigureBuffer). slot == image index (identity). If any
++    * image can't be wrapped, fall back to the libnx-framebuffer CPU-copy path. */
++   nvFenceInit();   /* required before nwindowDequeueBuffer / nvMultiFenceWait */
++   /* Recreate (e.g. resolution/aspect change): a previous swapchain may still own the nwindow's
++    * registered buffers. Release them and relinquish ownership now so our nwindowConfigureBuffer
++    * below doesn't collide (0xf59). The old swapchain's destroy will skip its release (no longer
++    * the owner). */
++   if (g_zc_owner != NULL && g_zc_owner != chain) {
++      nwindowReleaseBuffers(chain->window);
++      g_zc_owner->zero_copy = false;
++      g_zc_owner = NULL;
++   }
++   nwindowSetDimensions(chain->window, chain->extent.width, chain->extent.height);
++   chain->zero_copy = true;
++   for (uint32_t i = 0; i < num_images; i++) {
++      if (!wsi_switch_build_graphic_buffer(&chain->images[i].gb,
++                                           chain->images[i].base.image,
++                                           chain->vk_format, chain->extent)) {
++         printf("[wsi-zc] img%u build_graphic_buffer FAILED\n", i); fflush(stdout);
++         chain->zero_copy = false; break;
++      }
++      Result rc = nwindowConfigureBuffer(chain->window, (s32)i, &chain->images[i].gb);
++      printf("[wsi-zc] img%u nwindowConfigureBuffer -> 0x%x\n", i, (unsigned)rc); fflush(stdout);
++      if (R_FAILED(rc)) { chain->zero_copy = false; break; }
++      chain->images[i].configured = true;
++   }
++
++   if (chain->zero_copy) {
++      g_zc_owner = chain;   /* this swapchain now owns the nwindow's registered buffers */
++      printf("[wsi-zc] zero-copy ENABLED (block-linear scanout, kind=0xfe)\n"); fflush(stdout);
++      dusk_switch_log("[wsi] zero-copy ENABLED (block-linear nwindow scanout, kind=0xfe)\n");
++   } else {
++      printf("[wsi-zc] zero-copy FAILED -> CPU-copy fallback\n"); fflush(stdout);
++      /* Fallback: reset the nwindow, then libnx framebuffer + CPU-copy present. */
++      for (uint32_t i = 0; i < num_images; i++) chain->images[i].configured = false;
++      nwindowReleaseBuffers(chain->window);
++      u32 pixfmt = (chain->vk_format == VK_FORMAT_B8G8R8A8_UNORM)
++                   ? PIXEL_FORMAT_BGRA_8888 : PIXEL_FORMAT_RGBA_8888;
++      Result rc = framebufferCreate(&chain->fb, chain->window,
++                                    chain->extent.width, chain->extent.height,
++                                    pixfmt, num_images);
++      if (R_FAILED(rc)) { result = VK_ERROR_INITIALIZATION_FAILED; goto fail; }
++      framebufferMakeLinear(&chain->fb);
++      chain->fb_created = true;
++      dusk_switch_log("[wsi] zero-copy FAILED -> CPU-copy fallback\n");
++   }
++
++   *swapchain_out = &chain->base;
++   return VK_SUCCESS;
++
++fail:
++   wsi_switch_swapchain_destroy(&chain->base, pAllocator);
++   return result;
++}
++
++/* ---- registration ---- */
++
++VkResult
++wsi_switch_init_wsi(struct wsi_device *wsi_device,
++                    const VkAllocationCallbacks *alloc,
++                    VkPhysicalDevice physical_device)
++{
++   struct wsi_switch *wsi;
++   VkResult result;
++
++   wsi = vk_alloc(alloc, sizeof(*wsi), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
++   if (!wsi) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail;
++   }
++
++   wsi->wsi = wsi_device;
++   wsi->alloc = alloc;
++   wsi->physical_device = physical_device;
++
++   wsi->base.get_support = wsi_switch_surface_get_support;
++   wsi->base.get_capabilities2 = wsi_switch_surface_get_capabilities2;
++   wsi->base.get_formats = wsi_switch_surface_get_formats;
++   wsi->base.get_formats2 = wsi_switch_surface_get_formats2;
++   wsi->base.get_present_modes = wsi_switch_surface_get_present_modes;
++   wsi->base.get_present_rectangles = wsi_switch_surface_get_present_rectangles;
++   wsi->base.create_swapchain = wsi_switch_surface_create_swapchain;
++
++   wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = &wsi->base;
++   return VK_SUCCESS;
++
++fail:
++   wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = NULL;
++   return result;
++}
++
++void
++wsi_switch_finish_wsi(struct wsi_device *wsi_device,
++                      const VkAllocationCallbacks *alloc)
++{
++   struct wsi_switch *wsi =
++      (struct wsi_switch *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI];
++   if (wsi) {
++      vk_free(alloc, wsi);
++      wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = NULL;
++   }
++}
