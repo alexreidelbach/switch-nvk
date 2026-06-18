@@ -1,0 +1,6 @@
+[binaries]
+rust = ['/work/rustc-switch.sh']
+bindgen = 'bindgen'
+
+[properties]
+bindgen_clang_arguments = ['--target=aarch64-none-elf', '-isystem', '/opt/devkitpro/devkitA64/aarch64-none-elf/include', '-isystem', '/opt/devkitpro/libnx/include', '-D__SWITCH__', '-D_GNU_SOURCE', '-I/work/compat', '-include', '/work/compat/switch_compat.h']

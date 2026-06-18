@@ -1,0 +1,5 @@
+[binaries]
+pkg-config = 'pkg-config'
+pkgconfig = 'pkg-config'
+llvm-config = '/usr/bin/llvm-config-15'
+cmake = 'cmake'
