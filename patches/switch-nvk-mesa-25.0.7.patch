@@ -795,10 +795,10 @@ index 849bdc6..9178e09 100644
  
 diff --git a/src/vulkan/wsi/wsi_common_switch.c b/src/vulkan/wsi/wsi_common_switch.c
 new file mode 100644
-index 0000000..b132847
+index 0000000..3fabf7b
 --- /dev/null
 +++ b/src/vulkan/wsi/wsi_common_switch.c
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,640 @@
 +/*
 + * wsi_common_switch.c — VK_NN_vi_surface WSI backend for the Nintendo Switch,
 + * presenting through libnx `nwindow` (the VI compositor). Mirrors the structure
@@ -964,7 +964,9 @@ index 0000000..b132847
 +   if (surface->window != NULL)
 +      nwindowGetDimensions((NWindow *)surface->window, &w, &h);
 +
-+   caps->minImageCount = 2;
++   caps->minImageCount = 3;  /* Triple-buffer: with 2 buffers (1 in-flight) the acquire
++                                (nwindowDequeueBuffer) stalls on the 60Hz compositor and snaps
++                                every frame to 30fps; 3 lets the framerate track the real load. */
 +   caps->maxImageCount = 4;
 +   caps->currentExtent = (VkExtent2D){ w, h };
 +   caps->minImageExtent = (VkExtent2D){ 1, 1 };
