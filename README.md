@@ -34,10 +34,10 @@ version that lives in `master`.
 
 ## 📜 Licença / License
 
-🇧🇷 Código **AGPL-3.0** (veja [`LICENSE`](LICENSE)). Além disso, vale o
+🇧🇷 Código **GPL-2.0-or-later** (veja [`LICENSE`](LICENSE)). Além disso, vale o
 [`FORK_POLICY.md`](FORK_POLICY.md): **qualquer fork deste projeto precisa permanecer 100%
-open source.**
+open source.** Partes derivadas do Mesa/NVK permanecem sob suas licenças originais (MIT/Apache-2.0).
 
-🇬🇧 Code is **AGPL-3.0** (see [`LICENSE`](LICENSE)). On top of that, the
+🇬🇧 Code is **GPL-2.0-or-later** (see [`LICENSE`](LICENSE)). On top of that, the
 [`FORK_POLICY.md`](FORK_POLICY.md) applies: **any fork of this project must stay 100% open
-source.**
+source.** Portions derived from Mesa/NVK remain under their original licenses (MIT/Apache-2.0).
