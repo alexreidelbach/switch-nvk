@@ -1,0 +1,120 @@
+# Build tico-dolphin (with Wii online re-enabled) against the NVK driver
+# built by the "Build switch-nvk" workflow in this same repo.
+#
+# SETUP (one time):
+# 1. Add the networking patch to this repo at:  tico/wii-online.patch
+# 2. Add this file at:  .github/workflows/build-dolphin.yml
+# 3. Make sure the "Build switch-nvk" workflow has at least one green run
+# 4. Actions tab -> "Build tico-dolphin" -> Run workflow
+
+name: Build tico-dolphin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-dolphin.yml"
+      - "tico/wii-online.patch"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout (for the patch file)
+        uses: actions/checkout@v4
+
+      - name: Find latest successful NVK build
+        id: nvk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Build switch-nvk" --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No successful 'Build switch-nvk' run found — run that workflow to green first."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Using NVK artifacts from run $RUN_ID"
+
+      - name: Download NVK build tree
+        uses: actions/download-artifact@v4
+        with:
+          name: nvk-build-tree
+          run-id: ${{ steps.nvk.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download nvk-switch package
+        uses: actions/download-artifact@v4
+        with:
+          name: nvk-switch
+          path: nvk-switch
+          run-id: ${{ steps.nvk.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Synthesize MESA_NVK_DIR layout Dan's CMake expects
+        # Dan's CMake wants: MESA_NVK_DIR = a build dir INSIDE a mesa tree, i.e.
+        #   $MESA_NVK_DIR/../include                      (mesa public headers)
+        #   $MESA_NVK_DIR/src/**/lib*.a                   (the static archives)
+        #   $MESA_NVK_DIR/src/nouveau/vulkan/libvulkan.a  (ONE fat merged lib)
+        # We rebuild that shape from our two artifacts. The fat lib comes from
+        # nvk-switch (it already contains the winsys shims + loaderless ICD glue).
+        run: |
+          set -e
+          tar xf nvk-build-tree.tar.gz
+          mkdir -p mesa-tree
+          cp -r nvk-build-tree/mesa-25/include mesa-tree/include
+          cp -r nvk-build-tree/mb mesa-tree/nvk-build
+          cp nvk-switch/lib/libvulkan.a mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
+          echo "=== sanity ==="
+          ls mesa-tree/include | head
+          ls -lh mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
+
+      - name: Clone tico-dolphin (with submodules)
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules -j8 https://github.com/ticohq/tico-dolphin.git
+
+      - name: Apply Wii online networking patch
+        run: |
+          cd tico-dolphin
+          git apply --stat ../tico/wii-online.patch
+          git apply ../tico/wii-online.patch
+          echo "Patch applied."
+
+      - name: Add linker wrap flags required by the NVK fat lib
+        # HayatoG's libvulkan.a intercepts open/close/stat/lstat via ld --wrap
+        # (that's how the driver's fake /dev/nvidia* files work). The consumer
+        # link must pass the wrap flags, so append them to the toolchain file.
+        run: |
+          sed -i 's|switch.specs"|switch.specs -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=stat -Wl,--wrap=lstat"|' \
+            tico-dolphin/Source/Core/DolphinNX/nx-toolchain.cmake
+          grep -n "wrap" tico-dolphin/Source/Core/DolphinNX/nx-toolchain.cmake
+
+      - name: Build dolphin.nro
+        run: |
+          docker run --rm -v "$PWD:/ws" -w /ws/tico-dolphin devkitpro/devkita64:latest bash -lc '
+            set -e
+            apt-get update -qq && apt-get install -y -qq cmake ninja-build rsync >/dev/null
+            dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-libdrm_nouveau switch-zstd switch-zlib || true
+            export MESA_NVK_DIR=/ws/mesa-tree/nvk-build
+            bash build_dolphin_standalone_nro.sh
+          '
+
+      - name: Upload dolphin.nro
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphin-nro
+          path: |
+            tico-dolphin/build_nx_standalone/dolphin.nro
+            tico-dolphin/build_nx_standalone/Binaries/dolphin-nx.debug.elf
+          retention-days: 30
+
+      - name: Show CMake logs on failure
+        if: failure()
+        run: |
+          tail -n 150 tico-dolphin/build_nx_standalone/CMakeFiles/CMakeError.log 2>/dev/null || echo "(no CMakeError.log)"
+          tail -n 60 tico-dolphin/build_nx_standalone/CMakeFiles/CMakeOutput.log 2>/dev/null || true
