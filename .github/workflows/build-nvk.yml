@@ -100,7 +100,8 @@ jobs:
       - name: Bundle MESA_NVK_DIR tree for tico-dolphin
         run: |
           set -e
-          mkdir -p nvk-build-tree
+          mkdir -p nvk-build-tree/mb
+          mkdir -p nvk-build-tree/mesa-25/include nvk-build-tree/mesa-25/src
           rsync -a --include='*/' --include='*.a' --exclude='*' mb/ nvk-build-tree/mb/
           rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/include/ nvk-build-tree/mesa-25/include/
           rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/src/ nvk-build-tree/mesa-25/src/
