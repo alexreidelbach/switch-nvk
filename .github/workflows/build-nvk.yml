@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v3 (adds Rust std sysroot step; dumps meson log on failure)
+# Cloud build for switch-nvk — v4 (split build steps, strict errors, better logs)
 
 name: Build switch-nvk
 
@@ -36,20 +36,39 @@ jobs:
 
       - name: Apply Switch patches + WSI backend
         run: |
+          set -e
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
 
-      - name: Build Mesa NVK (2-phase cross build)
+      - name: "Phase 1: build native tools (mesa_clc + precomp)"
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash -lc '
+            set -e
+            export NATIVE_PREFIX=/work/native-prefix
+            bash /work/build-native-tools.sh
+            echo "=== verify mesa_clc ==="
+            ls -la /work/native-prefix/bin/
+            test -x /work/native-prefix/bin/mesa_clc
+          '
+
+      - name: "Phase 2: cross-configure Mesa NVK for Switch"
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
+            set -e
             export NATIVE_PREFIX=/work/native-prefix
             export PATH=/work/native-prefix/bin:$PATH
             export BUILD=/work/mb
-            bash /work/build-native-tools.sh
             bash /work/configure-mesa.sh
+          '
+
+      - name: "Phase 3: compile (ninja)"
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
+            set -e
+            export PATH=/work/native-prefix/bin:$PATH
             ninja -C /work/mb
           '
 
@@ -59,6 +78,7 @@ jobs:
 
       - name: Bundle MESA_NVK_DIR tree for tico-dolphin
         run: |
+          set -e
           mkdir -p nvk-build-tree
           rsync -a --include='*/' --include='*.a' --exclude='*' mb/ nvk-build-tree/mb/
           rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/include/ nvk-build-tree/mesa-25/include/
@@ -80,11 +100,13 @@ jobs:
           path: nvk-build-tree.tar.gz
           retention-days: 30
 
-      - name: Show meson log on failure
+      - name: Show build logs on failure
         if: failure()
         run: |
-          echo "=========== last 120 lines of meson-log.txt ==========="
-          tail -n 120 mb/meson-logs/meson-log.txt 2>/dev/null || echo "(no meson log found)"
+          echo "=========== native tools meson log (tail) ==========="
+          tail -n 80 native-tools/meson-logs/meson-log.txt 2>/dev/null || echo "(none)"
+          echo "=========== cross build meson log (tail) ==========="
+          tail -n 120 mb/meson-logs/meson-log.txt 2>/dev/null || echo "(none)"
 
       - name: Upload meson logs on failure
         if: failure()
@@ -93,5 +115,5 @@ jobs:
           name: meson-logs
           path: |
             mb/meson-logs/
-            mb/meson-info/
+            native-tools/meson-logs/
           retention-days: 7
