@@ -75,6 +75,11 @@ jobs:
         run: |
           sed -i 's|switch.specs"|switch.specs -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=stat -Wl,--wrap=lstat"|' \
             tico-dolphin/Source/Core/DolphinNX/nx-toolchain.cmake
+      - name: Enable Dan's boot log (debug build)
+        run: |
+          sed -i 's|static constexpr bool kNxLogEnabled = false;|static constexpr bool kNxLogEnabled = true;|' \
+            tico-dolphin/Source/Core/DolphinNX/main.cpp
+          grep -n "kNxLogEnabled" tico-dolphin/Source/Core/DolphinNX/main.cpp
 
       - name: Add missing link libraries (curl, mbedtls, expat, EGL)
         run: |
