@@ -1,0 +1,75 @@
+diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
+index b7a16de..045a8a4 100644
+--- a/Source/Core/Core/CMakeLists.txt
++++ b/Source/Core/Core/CMakeLists.txt
+@@ -472,6 +472,12 @@ target_sources(core PRIVATE
+   HW/EXI/EXI_DeviceModem.h
+   HW/SI/SI_DeviceGBA.cpp
+   HW/SI/SI_DeviceGBA.h
++)
++endif()
++
++# Wii online (IOS /dev/net stack) — compiled on Switch standalone too
++if(NOT LIBRETRO)
++target_sources(core PRIVATE
+   IOS/Network/ICMP.h
+   IOS/Network/ICMPLin.cpp
+   IOS/Network/IP/Top.cpp
+diff --git a/Source/Core/Core/IOS/IOS.cpp b/Source/Core/Core/IOS/IOS.cpp
+index 78ff27d..788a8bb 100644
+--- a/Source/Core/Core/IOS/IOS.cpp
++++ b/Source/Core/Core/IOS/IOS.cpp
+@@ -36,7 +36,7 @@
+ #include "Core/IOS/FS/FileSystem.h"
+ #include "Core/IOS/FS/FileSystemProxy.h"
+ #include "Core/IOS/MIOS.h"
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+ #include "Core/IOS/Network/IP/Top.h"
+ #include "Core/IOS/Network/KD/NetKDRequest.h"
+ #include "Core/IOS/Network/KD/NetKDTime.h"
+@@ -338,7 +338,7 @@ EmulationKernel::~EmulationKernel()
+ 
+   m_device_map.clear();
+   m_device_map.clear();
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+   m_socket_manager.reset();
+ #endif
+ }
+@@ -378,7 +378,7 @@ std::shared_ptr<ESDevice> EmulationKernel::GetESDevice()
+ 
+ std::shared_ptr<WiiSockMan> EmulationKernel::GetSocketManager()
+ {
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+   return m_socket_manager;
+ #else
+   return nullptr;
+@@ -575,7 +575,7 @@ void EmulationKernel::AddStaticDevices()
+ 
+   // Network modules
+   // Network modules
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+   if (HasFeature(features, Feature::KD) || HasFeature(features, Feature::SO) ||
+       HasFeature(features, Feature::SSL))
+   {
+@@ -887,7 +887,7 @@ void EmulationKernel::UpdateDevices()
+ void EmulationKernel::UpdateWantDeterminism(const bool new_want_determinism)
+ {
+   if (m_socket_manager)
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+     m_socket_manager->UpdateWantDeterminism(new_want_determinism);
+ #endif
+   for (const auto& device : m_device_map)
+@@ -911,7 +911,7 @@ void EmulationKernel::DoState(PointerWrap& p)
+     return;
+ 
+   if (m_socket_manager)
+-#if !defined(LIBRETRO) && !defined(__SWITCH__)
++#if !defined(LIBRETRO)
+     m_socket_manager->DoState(p);
+ #endif
+ 
