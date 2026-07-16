@@ -1,8 +1,8 @@
 diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
-index b7a16de..045a8a4 100644
+index b7a16de..445f0af 100644
 --- a/Source/Core/Core/CMakeLists.txt
 +++ b/Source/Core/Core/CMakeLists.txt
-@@ -472,6 +472,12 @@ target_sources(core PRIVATE
+@@ -472,6 +472,14 @@ target_sources(core PRIVATE
    HW/EXI/EXI_DeviceModem.h
    HW/SI/SI_DeviceGBA.cpp
    HW/SI/SI_DeviceGBA.h
@@ -12,6 +12,8 @@ index b7a16de..045a8a4 100644
 +# Wii online (IOS /dev/net stack) — compiled on Switch standalone too
 +if(NOT LIBRETRO)
 +target_sources(core PRIVATE
++  NetworkCaptureLogger.cpp
++  NetworkCaptureLogger.h
    IOS/Network/ICMP.h
    IOS/Network/ICMPLin.cpp
    IOS/Network/IP/Top.cpp
