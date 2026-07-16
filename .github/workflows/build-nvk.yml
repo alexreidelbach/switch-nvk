@@ -1,4 +1,5 @@
-# Cloud build for switch-nvk — v5 (native tools built on pristine tree, BEFORE Switch patches)
+# Cloud build for switch-nvk — v6 (Phase 3 keeps going past the .so link failure;
+# success is judged by the static archives, which is all package-nvk.sh needs)
 
 name: Build switch-nvk
 
@@ -64,12 +65,32 @@ jobs:
             bash /work/configure-mesa.sh
           '
 
-      - name: "Phase 3: compile (ninja)"
+      - name: "Phase 3: compile (ninja, tolerating the .so link failure)"
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
-            set -e
             export PATH=/work/native-prefix/bin:$PATH
-            ninja -C /work/mb
+            # -k 0: keep building unrelated targets even if some fail.
+            # The shared-library ICD (.so) CANNOT link on Switch (static-only platform)
+            # and we do not need it — only the static archives below matter.
+            ninja -C /work/mb -k 0 || echo "ninja reported failures (expected: the .so ICD link) — verifying static archives instead"
+            echo "=== verifying the archives package-nvk.sh needs ==="
+            fail=0
+            for a in \
+              src/nouveau/vulkan/libnvk.a \
+              src/nouveau/codegen/libnouveau_codegen.a \
+              src/util/libmesa_util.a src/util/libmesa_util_sse41.a src/util/blake3/libblake3.a \
+              src/c11/impl/libmesa_util_c11.a \
+              src/nouveau/compiler/libnak.a src/nouveau/compiler/libnak_rs.a \
+              src/compiler/rust/libcompiler_c_helpers.a \
+              src/nouveau/headers/libnvidia_headers_c.a \
+              src/nouveau/nil/liblibnil.a src/nouveau/nil/liblibnil_format_table.a \
+              src/compiler/nir/libnir.a src/compiler/libcompiler.a \
+              src/nouveau/mme/libnouveau_mme.a src/nouveau/winsys/libnouveau_ws.a \
+              src/vulkan/util/libvulkan_util.a src/compiler/spirv/libvtn.a \
+              src/util/libxmlconfig.a ; do
+              if [ -f "/work/mb/$a" ]; then echo "OK  $a"; else echo "MISSING  $a"; fail=1; fi
+            done
+            exit $fail
           '
 
       - name: Package nvk-switch install tree
