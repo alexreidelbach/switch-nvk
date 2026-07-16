@@ -1,13 +1,4 @@
-# Cloud build for HayatoG/switch-nvk — produces the NVK driver tree
-# needed to build tico-dolphin, with zero local setup.
-#
-# HOW TO USE (from your phone):
-# 1. Fork github.com/HayatoG/switch-nvk to your account
-# 2. In your fork: Add file -> Create new file
-#    name it:  .github/workflows/build-nvk.yml
-#    paste this entire file, commit to master
-# 3. Go to the Actions tab -> enable workflows -> run "Build switch-nvk"
-# 4. When it finishes (est. 1-3h), download the artifacts from the run page
+# Cloud build for switch-nvk — v2 (fixes script permissions, uploads logs on failure)
 
 name: Build switch-nvk
 
@@ -40,6 +31,9 @@ jobs:
           mv mesa-25.0.7 mesa-25
           rm mesa.tar.xz
 
+      - name: Fix script permissions
+        run: find . -name "*.sh" -exec chmod +x {} +
+
       - name: Apply Switch patches + WSI backend
         run: |
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
@@ -61,9 +55,6 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
       - name: Bundle MESA_NVK_DIR tree for tico-dolphin
-        # tico-dolphin wants the Mesa build-tree layout: headers from the
-        # source tree + the static .a archives from the build dir. Strip
-        # objects to keep the artifact small.
         run: |
           mkdir -p nvk-build-tree
           rsync -a --include='*/' --include='*.a' --exclude='*' mb/ nvk-build-tree/mb/
@@ -85,3 +76,13 @@ jobs:
           name: nvk-build-tree
           path: nvk-build-tree.tar.gz
           retention-days: 30
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs
+          path: |
+            mb/meson-logs/
+            mb/meson-info/
+          retention-days: 7
