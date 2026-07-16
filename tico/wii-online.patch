@@ -73,3 +73,52 @@ index 78ff27d..788a8bb 100644
      m_socket_manager->DoState(p);
  #endif
  
+diff --git a/Source/Core/Core/IOS/Network/IP/Top.cpp b/Source/Core/Core/IOS/Network/IP/Top.cpp
+index e9677d5..d2ff85f 100644
+--- a/Source/Core/Core/IOS/Network/IP/Top.cpp
++++ b/Source/Core/Core/IOS/Network/IP/Top.cpp
+@@ -42,9 +42,11 @@
+ 
+ #else
+ #include <arpa/inet.h>
++#ifndef __SWITCH__
+ #include <ifaddrs.h>
+-#include <netinet/in.h>
+ #include <resolv.h>
++#endif
++#include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <unistd.h>
+ #endif
+@@ -419,6 +421,23 @@ static std::optional<DefaultInterface> GetSystemDefaultInterface()
+   if (!default_interface_address)
+     return {};
+ 
++#ifdef __SWITCH__
++  // libnx has no getifaddrs(); synthesize a /24 interface around the address
++  // learned from the connected-UDP getsockname trick above. The emulated Wii
++  // only reports these values to the game; real traffic uses host sockets.
++  {
++    const in_addr ip = *default_interface_address;
++    in_addr netmask;
++    netmask.s_addr = inet_addr("255.255.255.0");
++    in_addr broadcast;
++    broadcast.s_addr = ip.s_addr | ~netmask.s_addr;
++    in_addr gateway;
++    gateway.s_addr = (ip.s_addr & netmask.s_addr) | htonl(1u);
++    if (routing_table.empty())
++      routing_table = {{0, {}, {}, gateway}};
++    return DefaultInterface{ip, netmask, broadcast, routing_table};
++  }
++#else
+   ifaddrs* iflist;
+   if (getifaddrs(&iflist) != 0)
+     return {};
+@@ -438,6 +457,7 @@ static std::optional<DefaultInterface> GetSystemDefaultInterface()
+                               get_addr(iface->ifa_broadaddr), routing_table};
+     }
+   }
++#endif
+ #endif
+   return std::nullopt;
+ }
