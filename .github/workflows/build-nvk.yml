@@ -45,7 +45,7 @@ jobs:
 
       - name: "Phase 1: build native tools (mesa_clc + precomp)"
         run: |
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash -lc '
+          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
             set -e
             export NATIVE_PREFIX=/work/native-prefix
             bash /work/build-native-tools.sh
