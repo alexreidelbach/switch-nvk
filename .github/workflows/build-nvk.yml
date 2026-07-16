@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v2 (fixes script permissions, uploads logs on failure)
+# Cloud build for switch-nvk — v3 (adds Rust std sysroot step; dumps meson log on failure)
 
 name: Build switch-nvk
 
@@ -39,6 +39,9 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
+      - name: Build Rust std sysroot for the Switch target
+        run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
+
       - name: Build Mesa NVK (2-phase cross build)
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
@@ -76,6 +79,12 @@ jobs:
           name: nvk-build-tree
           path: nvk-build-tree.tar.gz
           retention-days: 30
+
+      - name: Show meson log on failure
+        if: failure()
+        run: |
+          echo "=========== last 120 lines of meson-log.txt ==========="
+          tail -n 120 mb/meson-logs/meson-log.txt 2>/dev/null || echo "(no meson log found)"
 
       - name: Upload meson logs on failure
         if: failure()
