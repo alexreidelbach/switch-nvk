@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v4 (split build steps, strict errors, better logs)
+# Cloud build for switch-nvk — v5 (native tools built on pristine tree, BEFORE Switch patches)
 
 name: Build switch-nvk
 
@@ -34,16 +34,7 @@ jobs:
       - name: Fix script permissions
         run: find . -name "*.sh" -exec chmod +x {} +
 
-      - name: Apply Switch patches + WSI backend
-        run: |
-          set -e
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
-
-      - name: Build Rust std sysroot for the Switch target
-        run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
-
-      - name: "Phase 1: build native tools (mesa_clc + precomp)"
+      - name: "Phase 1: build native tools on PRISTINE tree (mesa_clc + precomp)"
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
             set -e
@@ -53,6 +44,15 @@ jobs:
             ls -la /work/native-prefix/bin/
             test -x /work/native-prefix/bin/mesa_clc
           '
+
+      - name: Apply Switch patches + WSI backend
+        run: |
+          set -e
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
+
+      - name: Build Rust std sysroot for the Switch target
+        run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
 
       - name: "Phase 2: cross-configure Mesa NVK for Switch"
         run: |
