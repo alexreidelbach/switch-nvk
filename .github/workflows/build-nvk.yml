@@ -1,0 +1,87 @@
+# Cloud build for HayatoG/switch-nvk — produces the NVK driver tree
+# needed to build tico-dolphin, with zero local setup.
+#
+# HOW TO USE (from your phone):
+# 1. Fork github.com/HayatoG/switch-nvk to your account
+# 2. In your fork: Add file -> Create new file
+#    name it:  .github/workflows/build-nvk.yml
+#    paste this entire file, commit to master
+# 3. Go to the Actions tab -> enable workflows -> run "Build switch-nvk"
+# 4. When it finishes (est. 1-3h), download the artifacts from the run page
+
+name: Build switch-nvk
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-nvk.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Build toolchain Docker image
+        run: docker build -t switch-nvk-build -f Dockerfile .
+
+      - name: Fetch Mesa 25.0.7
+        run: |
+          curl -L -o mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
+          tar xf mesa.tar.xz
+          mv mesa-25.0.7 mesa-25
+          rm mesa.tar.xz
+
+      - name: Apply Switch patches + WSI backend
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
+
+      - name: Build Mesa NVK (2-phase cross build)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
+            export NATIVE_PREFIX=/work/native-prefix
+            export PATH=/work/native-prefix/bin:$PATH
+            export BUILD=/work/mb
+            bash /work/build-native-tools.sh
+            bash /work/configure-mesa.sh
+            ninja -C /work/mb
+          '
+
+      - name: Package nvk-switch install tree
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
+
+      - name: Bundle MESA_NVK_DIR tree for tico-dolphin
+        # tico-dolphin wants the Mesa build-tree layout: headers from the
+        # source tree + the static .a archives from the build dir. Strip
+        # objects to keep the artifact small.
+        run: |
+          mkdir -p nvk-build-tree
+          rsync -a --include='*/' --include='*.a' --exclude='*' mb/ nvk-build-tree/mb/
+          rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/include/ nvk-build-tree/mesa-25/include/
+          rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/src/ nvk-build-tree/mesa-25/src/
+          tar -I 'gzip -6' -cf nvk-build-tree.tar.gz nvk-build-tree
+          ls -lh nvk-build-tree.tar.gz
+
+      - name: Upload nvk-switch package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvk-switch
+          path: nvk-switch/
+          retention-days: 30
+
+      - name: Upload MESA_NVK_DIR build tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvk-build-tree
+          path: nvk-build-tree.tar.gz
+          retention-days: 30
