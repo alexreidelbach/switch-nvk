@@ -125,10 +125,10 @@ index e9677d5..d2ff85f 100644
    return std::nullopt;
  }
 diff --git a/Source/Core/DolphinNX/main.cpp b/Source/Core/DolphinNX/main.cpp
-index 5a0d8df..3b37d6a 100644
+index 5a0d8df..b3d1a0a 100644
 --- a/Source/Core/DolphinNX/main.cpp
 +++ b/Source/Core/DolphinNX/main.cpp
-@@ -537,6 +537,24 @@ int main(int argc, char* argv[])
+@@ -537,6 +537,30 @@ int main(int argc, char* argv[])
      SetDefaultEnvIfUnset("MESA_VK_WSI_PRESENT_MODE", "fifo");
      LOG("Environment set\n");
  
@@ -139,7 +139,13 @@ index 5a0d8df..3b37d6a 100644
 +    // devices available". Must be set before the Vulkan instance is created.
 +    setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
 +    setenv("MESA_SHADER_CACHE_DISABLE", "1", 1);
-+    LOG("NVK broken-driver opt-in set\n");
++    // Diagnostic: capture the driver's own internal log (assert text, values,
++    // and the failing condition) to the SD card, exactly like HayatoG's working
++    // smoke apps do. Without this the driver's abort message is lost.
++    setenv("MESA_LOG_FILE", "sdmc:/nvk_mesa.log", 1);
++    setenv("MESA_VK_ABORT_ON_DEVICE_LOSS", "1", 1);
++    setenv("NVK_DEBUG", "push_sync", 1);
++    LOG("NVK broken-driver opt-in + mesa logging set\n");
 +
 +    // Debug: route HayatoG's NVK drm_shim trace into this boot log so we can
 +    // see why Vulkan physical-device discovery succeeds or fails.
