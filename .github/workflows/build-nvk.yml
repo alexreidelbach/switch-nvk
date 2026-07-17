@@ -52,6 +52,11 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
+      - name: Instrument wsi_switch_init_wsi array write (debug)
+        run: |
+          perl -0pi -e 's{wsi_device->wsi\[VK_ICD_WSI_PLATFORM_VI\] = &wsi->base;}{extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _z[160];snprintf(_z,sizeof _z,"SWWSI: pre-write VI=%d wsi_device=%p wsi=%p\\n",(int)VK_ICD_WSI_PLATFORM_VI,(void*)wsi_device,(void*)wsi);g_drm_shim_log_sink(_z);} wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = &wsi->base; if(g_drm_shim_log_sink)g_drm_shim_log_sink("SWWSI: post-write OK\\n");}' winsys/wsi/wsi_common_switch.c
+          grep -n "SWWSI" winsys/wsi/wsi_common_switch.c
+
       - name: Neutralize WSI asserts into logged warnings (debug)
         run: |
           perl -0pi -e 's{#include "wsi_common_private.h"}{#include "wsi_common_private.h"\nextern void (*g_drm_shim_log_sink)(const char *);\n#undef assert\n#define assert(e) do{if(!(e)){if(g_drm_shim_log_sink){char _b[192];snprintf(_b,sizeof _b,"WSI-ASSERT FAIL: %s \@ %s:%d\\n",#e,__FILE__,__LINE__);g_drm_shim_log_sink(_b);}}}while(0)}' winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
