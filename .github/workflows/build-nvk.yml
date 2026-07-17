@@ -51,7 +51,13 @@ jobs:
           set -e
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
-
+          
+      - name: Fix khr_present_wait assert for Dolphin (Switch)
+        run: |
+          F=winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
+          awk '/We cannot expose KHR_present_wait without timeline semaphores/ && !d { print "#ifdef __SWITCH__"; print "   wsi->khr_present_wait = false;"; print "#endif"; print ""; d=1 } { print }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+          grep -n "khr_present_wait = false" "$F"
+    
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
 
