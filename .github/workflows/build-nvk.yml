@@ -92,9 +92,11 @@ jobs:
             done
             exit $fail
           '
-
-      - name: Package nvk-switch install tree
+          
+      - name: Package nvk-switch install tree (with shim debug logging)
         run: |
+          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -DDRM_SHIM_DEBUG|' package-nvk.sh
+          grep -n "drm_shim.c" package-nvk.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
       - name: Bundle MESA_NVK_DIR tree for tico-dolphin
