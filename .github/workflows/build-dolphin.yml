@@ -68,8 +68,12 @@ jobs:
       - name: Apply Wii online networking patch
         run: |
           cd tico-dolphin
-          git apply --stat ../tico/wii-online.patch
-          git apply ../tico/wii-online.patch
+          git config user.email ci@local
+          git config user.name ci
+          git apply --3way --whitespace=fix ../tico/wii-online.patch || \
+            git apply --3way --whitespace=fix --reject ../tico/wii-online.patch
+          echo "=== applied (showing changed files) ==="
+          git status --short
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
