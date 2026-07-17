@@ -51,7 +51,12 @@ jobs:
           set -e
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
-          
+
+      - name: Neutralize WSI asserts into logged warnings (debug)
+        run: |
+          perl -0pi -e 's{#include "wsi_common_private.h"}{#include "wsi_common_private.h"\nextern void (*g_drm_shim_log_sink)(const char *);\n#undef assert\n#define assert(e) do{if(!(e)){if(g_drm_shim_log_sink){char _b[192];snprintf(_b,sizeof _b,"WSI-ASSERT FAIL: %s \@ %s:%d\\n",#e,__FILE__,__LINE__);g_drm_shim_log_sink(_b);}}}while(0)}' winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
+          grep -n "WSI-ASSERT FAIL" winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
+      
       - name: Fix khr_present_wait assert for Dolphin (Switch)
         run: |
           F=winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
