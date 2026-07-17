@@ -143,4 +143,4 @@ index 5a0d8df..4f44089 100644
 +
      s_nwindow = nwindowGetDefault();
      LOG("NWindow: %p\n", (void*)s_nwindow);
-     nwindowSetSwapInterval(s_nwindow, 1);
+     nwindowSetSwapInterval(s_nwindow, 1); 
