@@ -1,7 +1,6 @@
-# Build tico-dolphin (Wii online) — v3
-# Now VERIFIES the downloaded NVK actually contains our debug instrumentation
-# (VDS / SHIMCALL strings) before building, so we can never silently build
-# against a stale NVK artifact.
+# Build tico-dolphin (Wii online) — v4
+# VERIFY step now checks that the wsi[] array-resize FIX is present in the NVK
+# (the VK_ICD_WSI_PLATFORM_VI + 1 define), instead of the old debug markers.
 
 name: Build tico-dolphin
 
@@ -62,30 +61,24 @@ jobs:
           cp nvk-switch/lib/libvulkan.a mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
           ls -lh mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
 
-      - name: VERIFY the NVK contains our debug instrumentation
+      - name: VERIFY the NVK contains the wsi[] array-resize FIX
         run: |
           set -e
-          LIB=nvk-switch/lib/libvulkan.a
-          echo "Scanning $LIB for debug marker strings..."
-          # These strings only exist if the current instrumented NVK was built.
-          MISSING=0
-          for s in "VDS pre-getcap" "VDS final" "SHIMCALL getcap" "SHIMCALL syncobj_create"; do
-            if strings "$LIB" | grep -qF "$s"; then
-              echo "  FOUND: $s"
-            else
-              echo "  *** MISSING: $s ***"
-              MISSING=1
-            fi
-          done
-          if [ "$MISSING" = "1" ]; then
-            echo ""
-            echo "ERROR: The downloaded NVK artifact does NOT contain the current debug"
-            echo "instrumentation. This means the NVK build with the instrumentation has"
-            echo "not finished yet, or an older NVK run was selected. Re-run 'Build"
-            echo "switch-nvk' to green FIRST, then re-run this workflow."
+          H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
+          echo "Checking $H for the VI array-resize fix..."
+          if [ ! -f "$H" ]; then
+            echo "ERROR: wsi_common.h not found in the NVK build tree artifact."
+            echo "The NVK bundle may be from an older run. Re-run 'Build switch-nvk' first."
             exit 1
           fi
-          echo "OK: NVK contains current instrumentation — safe to build."
+          if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
+            echo "OK: NVK carries the array-resize fix (VK_ICD_WSI_PLATFORM_VI + 1). Safe to build."
+          else
+            echo "*** MISSING: the wsi[] array-resize fix is NOT in this NVK. ***"
+            echo "This NVK would crash with the out-of-bounds write. Re-run the FIXED"
+            echo "'Build switch-nvk' (v10) to green FIRST, then re-run this workflow."
+            exit 1
+          fi
 
       - name: Clone tico-dolphin (with submodules)
         run: |
