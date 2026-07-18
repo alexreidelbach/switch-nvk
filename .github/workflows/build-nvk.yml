@@ -52,6 +52,11 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
+      - name: Disable timeline syncobj cap (fix NULL get_value crash)
+        run: |
+          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 1;   \/\* binary \+ timeline syncobjs supported \(see note above\) \*\/\n      break;/   case DRM_CAP_SYNCOBJ:\n      *value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 0;\n      break;/' winsys/drm_shim.c
+          grep -n "DRM_CAP_SYNCOBJ_TIMELINE" winsys/drm_shim.c
+      
       - name: Instrument syncobj/getcap entry points (debug)
         run: |
           perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/; s/(int drmSyncobjQuery\(int fd, uint32_t \*handles,[\s\S]*?\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_query\\n");/;' winsys/drm_shim.c
