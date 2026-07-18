@@ -1,7 +1,7 @@
-# Build tico-dolphin (Wii online) — v2
-# Adds the four link fixes discovered at the final link:
-#   curl (WiiConnect24/KD), expat (Mesa xmlconfig), EGL/glapi (SDL2 portlib), 
-#   NetworkCaptureLogger comes from patch v3.
+# Build tico-dolphin (Wii online) — v3
+# Now VERIFIES the downloaded NVK actually contains our debug instrumentation
+# (VDS / SHIMCALL strings) before building, so we can never silently build
+# against a stale NVK artifact.
 
 name: Build tico-dolphin
 
@@ -34,6 +34,7 @@ jobs:
             echo "No successful 'Build switch-nvk' run found."
             exit 1
           fi
+          echo "Using NVK run id: $RUN_ID"
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download NVK build tree
@@ -61,6 +62,31 @@ jobs:
           cp nvk-switch/lib/libvulkan.a mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
           ls -lh mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
 
+      - name: VERIFY the NVK contains our debug instrumentation
+        run: |
+          set -e
+          LIB=nvk-switch/lib/libvulkan.a
+          echo "Scanning $LIB for debug marker strings..."
+          # These strings only exist if the current instrumented NVK was built.
+          MISSING=0
+          for s in "VDS pre-getcap" "VDS final" "SHIMCALL getcap" "SHIMCALL syncobj_create"; do
+            if strings "$LIB" | grep -qF "$s"; then
+              echo "  FOUND: $s"
+            else
+              echo "  *** MISSING: $s ***"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "ERROR: The downloaded NVK artifact does NOT contain the current debug"
+            echo "instrumentation. This means the NVK build with the instrumentation has"
+            echo "not finished yet, or an older NVK run was selected. Re-run 'Build"
+            echo "switch-nvk' to green FIRST, then re-run this workflow."
+            exit 1
+          fi
+          echo "OK: NVK contains current instrumentation — safe to build."
+
       - name: Clone tico-dolphin (with submodules)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules -j8 https://github.com/ticohq/tico-dolphin.git
@@ -79,6 +105,7 @@ jobs:
         run: |
           sed -i 's|switch.specs"|switch.specs -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=stat -Wl,--wrap=lstat"|' \
             tico-dolphin/Source/Core/DolphinNX/nx-toolchain.cmake
+
       - name: Enable Dan's boot log (debug build)
         run: |
           sed -i 's|static constexpr bool kNxLogEnabled = false;|static constexpr bool kNxLogEnabled = true;|' \
@@ -89,9 +116,7 @@ jobs:
         run: |
           set -e
           CM=tico-dolphin/Source/Core/DolphinNX/CMakeLists.txt
-          # curl + its tls deps + expat, appended next to the existing system libs
           sed -i 's|-ldrm_nouveau|-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lexpat -ldrm_nouveau|' "$CM"
-          # SDL2's video backend references EGL; satisfy from the switch-mesa portlib
           sed -i 's|${DEVKITPRO}/portlibs/switch/lib/libSDL2.a|${DEVKITPRO}/portlibs/switch/lib/libSDL2.a ${DEVKITPRO}/portlibs/switch/lib/libEGL.a ${DEVKITPRO}/portlibs/switch/lib/libglapi.a|' "$CM"
           grep -n "lcurl\|libEGL" "$CM"
 
