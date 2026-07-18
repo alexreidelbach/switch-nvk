@@ -1,6 +1,9 @@
-# Cloud build for switch-nvk — v9
-# Adds PDEV progress markers in nvk_physical_device.c to isolate WHICH call
-# between sync-type creation and nvk_init_wsi is the crash. Also keeps VDS.
+# Cloud build for switch-nvk — v10  *** THE FIX ***
+# ROOT CAUSE FOUND: the big patch's wsi_common.h hunk (expects the #define at
+# line ~97) is REJECTED against real 25.0.7 (where it's at line 55), so the
+# VK_ICD_WSI_PLATFORM_MAX array-resize never applies. The wsi[] array stays 12
+# slots while wsi_common_switch.c writes to slot 12 (VK_ICD_WSI_PLATFORM_VI) ->
+# out-of-bounds write -> svcBreak. This build FORCES the resize directly.
 
 name: Build switch-nvk
 
@@ -53,39 +56,25 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
-      # ---- ALL SOURCE INSTRUMENTATION RUNS AFTER THE PATCH ----
-
-      - name: "Instrument vk_drm_syncobj get_type (VDS debug)"
+      # ================= THE ROOT-CAUSE FIX =================
+      - name: "FORCE wsi[] array resize for VI platform (fixes OOB write crash)"
         run: |
-          F=mesa-25/src/vulkan/runtime/vk_drm_syncobj.c
-          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS pre-getcap fd=%d feat=0x%x\\n\",drm_fd,(unsigned)type.features); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmGetCap\(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE/;' "$F"
-          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS final feat=0x%x gv=%p\\n\",(unsigned)type.features,(void*)type.get_value); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmSyncobjDestroy\(drm_fd, syncobj\);/;' "$F"
-          echo "VDS marker count (expect 2):"
-          grep -c "VDS" "$F"
-
-      - name: "Instrument nvk_physical_device progress (PDEV debug)"
-        run: |
-          F=mesa-25/src/nouveau/vulkan/nvk_physical_device.c
-          perl -0777 -pi -e '
-          s/(   result = vk_physical_device_init\(&pdev->vk,)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV A: before vk_physical_device_init\\n"); }\n#endif\n$1/;
-          s/(   pdev->nak = nak_compiler_create\(&pdev->info\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV B: before nak_compiler_create\\n"); }\n#endif\n$1/;
-          s/(   nvk_physical_device_init_pipeline_cache\(pdev\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV C: after nak, before pipeline_cache\\n"); }\n#endif\n$1/;
-          s/(   pdev->vk.supported_sync_types = nvkmd->sync_types;)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV D: before init_wsi\\n"); }\n#endif\n$1/;
-          ' "$F"
-          echo "PDEV marker count (expect 4):"
-          grep -c "PDEV " "$F"
-
-      - name: "Restore timeline cap + syncobj destroy returns 0"
-        run: |
-          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n      \*value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 0;\n      break;/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 1;\n      break;/' winsys/drm_shim.c || true
-          perl -0777 -pi -e 's/(   mutexUnlock\(&g_dev\.lock\);\n)   return s \? 0 : -ENOENT;/$1   return 0;/' winsys/drm_shim.c || true
-          echo "(timeline cap restore + destroy fix applied where present)"
-
-      - name: "Instrument syncobj/getcap entry points (SHIMCALL debug)"
-        run: |
-          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/;' winsys/drm_shim.c
-          echo "SHIMCALL marker count (expect >=2):"
-          grep -c "SHIMCALL" winsys/drm_shim.c
+          set -e
+          H=mesa-25/src/vulkan/wsi/wsi_common.h
+          echo "Before:"
+          grep -n "VK_ICD_WSI_PLATFORM_MAX" "$H" | head
+          # Only rewrite the bare METAL+1 define if the VI-aware version isn't already present.
+          if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
+            echo "Array already sized for VI — patch applied correctly, nothing to do."
+          else
+            perl -0777 -pi -e 's/#define VK_ICD_WSI_PLATFORM_MAX \(VK_ICD_WSI_PLATFORM_METAL \+ 1\)/#ifdef VK_USE_PLATFORM_VI_NN\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)\n#else\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)\n#endif/' "$H"
+            echo "FORCED the VI array resize."
+          fi
+          echo "After:"
+          grep -n "VK_ICD_WSI_PLATFORM_MAX\|VK_ICD_WSI_PLATFORM_VI" "$H" | head
+          # Hard verification: the VI-sized define MUST now be present, or fail the build.
+          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize still missing"; exit 1; }
+          echo "OK: wsi[] array will be sized for VK_ICD_WSI_PLATFORM_VI."
 
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
