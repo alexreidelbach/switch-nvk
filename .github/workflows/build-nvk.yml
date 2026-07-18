@@ -1,9 +1,8 @@
-# Cloud build for switch-nvk — v10  *** THE FIX ***
-# ROOT CAUSE FOUND: the big patch's wsi_common.h hunk (expects the #define at
-# line ~97) is REJECTED against real 25.0.7 (where it's at line 55), so the
-# VK_ICD_WSI_PLATFORM_MAX array-resize never applies. The wsi[] array stays 12
-# slots while wsi_common_switch.c writes to slot 12 (VK_ICD_WSI_PLATFORM_VI) ->
-# out-of-bounds write -> svcBreak. This build FORCES the resize directly.
+# Cloud build for switch-nvk — v11  *** DEBUG SYMBOLS ***
+# Injects -g (keeping -O2 so codegen/timing is UNCHANGED) into the NVK cross
+# compile. This does NOT change behavior — it only adds DWARF line info so that
+# addr2line against dolphin-nx.debug.elf resolves the crash PC to an exact
+# file:line instead of just a function name. Keeps the array-resize fix too.
 
 name: Build switch-nvk
 
@@ -39,6 +38,18 @@ jobs:
       - name: Fix script permissions
         run: find . -name "*.sh" -exec chmod +x {} +
 
+      - name: "Add -g debug line info to the NVK cross compile"
+        run: |
+          set -e
+          X=crossfiles/switch.cross
+          echo "Before:"; grep -c "'-g'" "$X" || true
+          # Insert -g right after every -O2 (both c_args and cpp_args). Keeps -O2.
+          perl -pi -e "s/'-O2','-ffunction-sections'/'-O2','-g','-ffunction-sections'/g" "$X"
+          echo "After ('-g' occurrences, expect 2):"
+          grep -c "'-g'" "$X"
+          grep -q "'-O2','-g','-ffunction-sections'" "$X" || { echo "ERROR: -g not injected"; exit 1; }
+          echo "OK: debug line info enabled (behavior unchanged, -O2 kept)."
+
       - name: "Phase 1: build native tools on PRISTINE tree (mesa_clc + precomp)"
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
@@ -56,25 +67,17 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
-      # ================= THE ROOT-CAUSE FIX =================
-      - name: "FORCE wsi[] array resize for VI platform (fixes OOB write crash)"
+      - name: "FORCE wsi[] array resize for VI platform (keep the fix)"
         run: |
           set -e
           H=mesa-25/src/vulkan/wsi/wsi_common.h
-          echo "Before:"
-          grep -n "VK_ICD_WSI_PLATFORM_MAX" "$H" | head
-          # Only rewrite the bare METAL+1 define if the VI-aware version isn't already present.
           if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
-            echo "Array already sized for VI — patch applied correctly, nothing to do."
+            echo "Array already sized for VI."
           else
             perl -0777 -pi -e 's/#define VK_ICD_WSI_PLATFORM_MAX \(VK_ICD_WSI_PLATFORM_METAL \+ 1\)/#ifdef VK_USE_PLATFORM_VI_NN\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)\n#else\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)\n#endif/' "$H"
             echo "FORCED the VI array resize."
           fi
-          echo "After:"
-          grep -n "VK_ICD_WSI_PLATFORM_MAX\|VK_ICD_WSI_PLATFORM_VI" "$H" | head
-          # Hard verification: the VI-sized define MUST now be present, or fail the build.
           grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize still missing"; exit 1; }
-          echo "OK: wsi[] array will be sized for VK_ICD_WSI_PLATFORM_VI."
 
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
@@ -116,7 +119,7 @@ jobs:
 
       - name: Package nvk-switch install tree (with shim debug logging)
         run: |
-          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -DDRM_SHIM_DEBUG|' package-nvk.sh
+          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g -DDRM_SHIM_DEBUG|' package-nvk.sh
           grep -n "drm_shim.c" package-nvk.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
