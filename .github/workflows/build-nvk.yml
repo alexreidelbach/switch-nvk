@@ -32,6 +32,12 @@ jobs:
           mv mesa-25.0.7 mesa-25
           rm mesa.tar.xz
 
+      - name: Instrument vk_drm_syncobj get_type (debug)
+        run: |
+          F=mesa-25/src/vulkan/runtime/vk_drm_syncobj.c
+          perl -0777 -pi -e 's{(err = drmGetCap\(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE, &cap\);)}{extern void (*g_drm_shim_log_sink)(const char *); {char _b[160]; snprintf(_b,sizeof _b,"VDS: fd=%d before features=0x%x wait_many=%p\\n",drm_fd,(unsigned)type.features,(void*)type.wait_many); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b);} $1 {char _b[160]; snprintf(_b,sizeof _b,"VDS: getcap ret=%d cap=%llu\\n",err,(unsigned long long)cap); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b);}}g; s{(err = drmSyncobjDestroy\(drm_fd, syncobj\);\n   assert\(err == 0\);)}{{char _b[160]; snprintf(_b,sizeof _b,"VDS: final features=0x%x get_value=%p\\n",(unsigned)type.features,(void*)type.get_value); extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b);} err = drmSyncobjDestroy(drm_fd, syncobj);}g;' "$F"
+          grep -c "VDS:" "$F"
+
       - name: Fix script permissions
         run: find . -name "*.sh" -exec chmod +x {} +
 
