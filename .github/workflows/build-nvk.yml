@@ -1,5 +1,6 @@
-# Cloud build for switch-nvk — v6 (Phase 3 keeps going past the .so link failure;
-# success is judged by the static archives, which is all package-nvk.sh needs)
+# Cloud build for switch-nvk — v7
+# Instrumentation ordering fixed: all source edits that touch the Mesa tree run
+# AFTER "Apply Switch patches" so they land in the file that actually compiles.
 
 name: Build switch-nvk
 
@@ -32,14 +33,6 @@ jobs:
           mv mesa-25.0.7 mesa-25
           rm mesa.tar.xz
 
-      - name: Instrument vk_drm_syncobj get_type (debug)
-        run: |
-          F=mesa-25/src/vulkan/runtime/vk_drm_syncobj.c
-          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS pre-getcap fd=%d feat=0x%x\\n\",drm_fd,(unsigned)type.features); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmGetCap\(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE/;' "$F"
-          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS final feat=0x%x gv=%p\\n\",(unsigned)type.features,(void*)type.get_value); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmSyncobjDestroy\(drm_fd, syncobj\);/;' "$F"
-          grep -c "VDS" "$F"
-
-
       - name: Fix script permissions
         run: find . -name "*.sh" -exec chmod +x {} +
 
@@ -60,33 +53,28 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
-      - name: Fix syncobj destroy assert (return 0) + restore timeline cap
-        run: |
-          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n      \*value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 0;\n      break;/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 1;\n      break;/' winsys/drm_shim.c
-          perl -0777 -pi -e 's/(   mutexUnlock\(&g_dev\.lock\);\n)   return s \? 0 : -ENOENT;/$1   return 0; \/* destroy of absent handle is harmless; stock get_type asserts ==0 *\//' winsys/drm_shim.c
-          grep -n "destroy of absent handle\|value = 1" winsys/drm_shim.c | head
-      
-      - name: Instrument syncobj/getcap entry points (debug)
-        run: |
-          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/; s/(int drmSyncobjQuery\(int fd, uint32_t \*handles,[\s\S]*?\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_query\\n");/;' winsys/drm_shim.c
-          grep -c "SHIMCALL" winsys/drm_shim.c
-      
-      - name: Instrument wsi_switch_init_wsi array write (debug)
-        run: |
-          perl -0pi -e 's{wsi_device->wsi\[VK_ICD_WSI_PLATFORM_VI\] = &wsi->base;}{extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _z[160];snprintf(_z,sizeof _z,"SWWSI: pre-write VI=%d wsi_device=%p wsi=%p\\n",(int)VK_ICD_WSI_PLATFORM_VI,(void*)wsi_device,(void*)wsi);g_drm_shim_log_sink(_z);} wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = &wsi->base; if(g_drm_shim_log_sink)g_drm_shim_log_sink("SWWSI: post-write OK\\n");}' winsys/wsi/wsi_common_switch.c
-          grep -n "SWWSI" winsys/wsi/wsi_common_switch.c
+      # ---- ALL SOURCE INSTRUMENTATION RUNS AFTER THE PATCH ----
 
-      - name: Neutralize WSI asserts into logged warnings (debug)
+      - name: "Instrument vk_drm_syncobj get_type (VDS debug)"
         run: |
-          perl -0pi -e 's{#include "wsi_common_private.h"}{#include "wsi_common_private.h"\nextern void (*g_drm_shim_log_sink)(const char *);\n#undef assert\n#define assert(e) do{if(!(e)){if(g_drm_shim_log_sink){char _b[192];snprintf(_b,sizeof _b,"WSI-ASSERT FAIL: %s \@ %s:%d\\n",#e,__FILE__,__LINE__);g_drm_shim_log_sink(_b);}}}while(0)}' winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
-          grep -n "WSI-ASSERT FAIL" winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
-      
-      - name: Fix khr_present_wait assert for Dolphin (Switch)
+          F=mesa-25/src/vulkan/runtime/vk_drm_syncobj.c
+          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS pre-getcap fd=%d feat=0x%x\\n\",drm_fd,(unsigned)type.features); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmGetCap\(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE/;' "$F"
+          perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS final feat=0x%x gv=%p\\n\",(unsigned)type.features,(void*)type.get_value); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmSyncobjDestroy\(drm_fd, syncobj\);/;' "$F"
+          echo "VDS marker count (expect 2):"
+          grep -c "VDS" "$F"
+
+      - name: "Restore timeline cap + syncobj destroy returns 0"
         run: |
-          F=winsys/mesa-edits/src/vulkan/wsi/wsi_common.c
-          awk '/We cannot expose KHR_present_wait without timeline semaphores/ && !d { print "#ifdef __SWITCH__"; print "   wsi->khr_present_wait = false;"; print "#endif"; print ""; d=1 } { print }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
-          grep -n "khr_present_wait = false" "$F"
-    
+          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n      \*value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 0;\n      break;/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 1;\n      break;/' winsys/drm_shim.c || true
+          perl -0777 -pi -e 's/(   mutexUnlock\(&g_dev\.lock\);\n)   return s \? 0 : -ENOENT;/$1   return 0;/' winsys/drm_shim.c || true
+          echo "(timeline cap restore + destroy fix applied where present)"
+
+      - name: "Instrument syncobj/getcap entry points (SHIMCALL debug)"
+        run: |
+          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/;' winsys/drm_shim.c
+          echo "SHIMCALL marker count (expect >=2):"
+          grep -c "SHIMCALL" winsys/drm_shim.c
+
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
 
@@ -104,9 +92,6 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
             export PATH=/work/native-prefix/bin:$PATH
-            # -k 0: keep building unrelated targets even if some fail.
-            # The shared-library ICD (.so) CANNOT link on Switch (static-only platform)
-            # and we do not need it — only the static archives below matter.
             ninja -C /work/mb -k 0 || echo "ninja reported failures (expected: the .so ICD link) — verifying static archives instead"
             echo "=== verifying the archives package-nvk.sh needs ==="
             fail=0
@@ -127,7 +112,7 @@ jobs:
             done
             exit $fail
           '
-          
+
       - name: Package nvk-switch install tree (with shim debug logging)
         run: |
           sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -DDRM_SHIM_DEBUG|' package-nvk.sh
