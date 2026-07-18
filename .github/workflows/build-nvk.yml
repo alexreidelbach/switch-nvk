@@ -52,6 +52,11 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
+      - name: Instrument syncobj/getcap entry points (debug)
+        run: |
+          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/; s/(int drmSyncobjQuery\(int fd, uint32_t \*handles,[\s\S]*?\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_query\\n");/;' winsys/drm_shim.c
+          grep -c "SHIMCALL" winsys/drm_shim.c
+      
       - name: Instrument wsi_switch_init_wsi array write (debug)
         run: |
           perl -0pi -e 's{wsi_device->wsi\[VK_ICD_WSI_PLATFORM_VI\] = &wsi->base;}{extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _z[160];snprintf(_z,sizeof _z,"SWWSI: pre-write VI=%d wsi_device=%p wsi=%p\\n",(int)VK_ICD_WSI_PLATFORM_VI,(void*)wsi_device,(void*)wsi);g_drm_shim_log_sink(_z);} wsi_device->wsi[VK_ICD_WSI_PLATFORM_VI] = &wsi->base; if(g_drm_shim_log_sink)g_drm_shim_log_sink("SWWSI: post-write OK\\n");}' winsys/wsi/wsi_common_switch.c
