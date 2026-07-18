@@ -52,10 +52,11 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
-      - name: Disable timeline syncobj cap (fix NULL get_value crash)
+      - name: Fix syncobj destroy assert (return 0) + restore timeline cap
         run: |
-          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 1;   \/\* binary \+ timeline syncobjs supported \(see note above\) \*\/\n      break;/   case DRM_CAP_SYNCOBJ:\n      *value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 0;\n      break;/' winsys/drm_shim.c
-          grep -n "DRM_CAP_SYNCOBJ_TIMELINE" winsys/drm_shim.c
+          perl -0777 -pi -e 's/   case DRM_CAP_SYNCOBJ:\n      \*value = 1;\n      break;\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      \*value = 0;\n      break;/   case DRM_CAP_SYNCOBJ:\n   case DRM_CAP_SYNCOBJ_TIMELINE:\n      *value = 1;\n      break;/' winsys/drm_shim.c
+          perl -0777 -pi -e 's/(   mutexUnlock\(&g_dev\.lock\);\n)   return s \? 0 : -ENOENT;/$1   return 0; \/* destroy of absent handle is harmless; stock get_type asserts ==0 *\//' winsys/drm_shim.c
+          grep -n "destroy of absent handle\|value = 1" winsys/drm_shim.c | head
       
       - name: Instrument syncobj/getcap entry points (debug)
         run: |
