@@ -1,7 +1,6 @@
-# Cloud build for switch-nvk — v8
-# Adds GETVAL instrumentation: logs device->drm_fd when vk_drm_syncobj_get_value
-# is actually CALLED (downstream of get_type). Tests whether the crash is the
-# assert(device->drm_fd >= 0) firing because drm_fd is unset when WSI uses the sync.
+# Cloud build for switch-nvk — v9
+# Adds PDEV progress markers in nvk_physical_device.c to isolate WHICH call
+# between sync-type creation and nvk_init_wsi is the crash. Also keeps VDS.
 
 name: Build switch-nvk
 
@@ -56,16 +55,25 @@ jobs:
 
       # ---- ALL SOURCE INSTRUMENTATION RUNS AFTER THE PATCH ----
 
-      - name: "Instrument vk_drm_syncobj get_type + get_value (VDS/GETVAL debug)"
+      - name: "Instrument vk_drm_syncobj get_type (VDS debug)"
         run: |
           F=mesa-25/src/vulkan/runtime/vk_drm_syncobj.c
           perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS pre-getcap fd=%d feat=0x%x\\n\",drm_fd,(unsigned)type.features); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmGetCap\(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE/;' "$F"
           perl -pi -e 'print "#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _b[128]; snprintf(_b,sizeof _b,\"VDS final feat=0x%x gv=%p\\n\",(unsigned)type.features,(void*)type.get_value); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_b); }\n#endif\n" if /err = drmSyncobjDestroy\(drm_fd, syncobj\);/;' "$F"
-          perl -0777 -pi -e 's/(   struct vk_drm_syncobj \*sobj = to_drm_syncobj\(sync\);\n\n   assert\(device->drm_fd >= 0\);)/   struct vk_drm_syncobj *sobj = to_drm_syncobj(sync);\n#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _g[96]; snprintf(_g,sizeof _g,"GETVAL called drm_fd=%d\\n",device->drm_fd); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_g); }\n#endif\n   assert(device->drm_fd >= 0);/' "$F"
           echo "VDS marker count (expect 2):"
           grep -c "VDS" "$F"
-          echo "GETVAL marker count (expect 1):"
-          grep -c "GETVAL" "$F"
+
+      - name: "Instrument nvk_physical_device progress (PDEV debug)"
+        run: |
+          F=mesa-25/src/nouveau/vulkan/nvk_physical_device.c
+          perl -0777 -pi -e '
+          s/(   result = vk_physical_device_init\(&pdev->vk,)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV A: before vk_physical_device_init\\n"); }\n#endif\n$1/;
+          s/(   pdev->nak = nak_compiler_create\(&pdev->info\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV B: before nak_compiler_create\\n"); }\n#endif\n$1/;
+          s/(   nvk_physical_device_init_pipeline_cache\(pdev\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV C: after nak, before pipeline_cache\\n"); }\n#endif\n$1/;
+          s/(   pdev->vk.supported_sync_types = nvkmd->sync_types;)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("PDEV D: before init_wsi\\n"); }\n#endif\n$1/;
+          ' "$F"
+          echo "PDEV marker count (expect 4):"
+          grep -c "PDEV " "$F"
 
       - name: "Restore timeline cap + syncobj destroy returns 0"
         run: |
@@ -75,8 +83,8 @@ jobs:
 
       - name: "Instrument syncobj/getcap entry points (SHIMCALL debug)"
         run: |
-          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/; s/(int drmSyncobjQuery\(int fd, uint32_t \*handles,[\s\S]*?\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_query\\n");/;' winsys/drm_shim.c
-          echo "SHIMCALL marker count (expect >=3):"
+          perl -0777 -pi -e 's/(int drmGetCap\(int fd, uint64_t capability, uint64_t \*value\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink){char _c[80];snprintf(_c,sizeof _c,"SHIMCALL getcap 0x%llx\\n",(unsigned long long)capability);g_drm_shim_log_sink(_c);}/; s/(int drmSyncobjCreate\(int fd, uint32_t flags, uint32_t \*handle\)\s*\{)/$1 extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHIMCALL syncobj_create\\n");/;' winsys/drm_shim.c
+          echo "SHIMCALL marker count (expect >=2):"
           grep -c "SHIMCALL" winsys/drm_shim.c
 
       - name: Build Rust std sysroot for the Switch target
