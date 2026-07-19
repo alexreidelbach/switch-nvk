@@ -71,11 +71,10 @@ jobs:
         run: |
           set -e
           H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
-          P=nvk-build-tree/mesa-25/src/nouveau/vulkan/nvk_physical_device.c
           grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "*** MISSING array-resize fix. Re-run Build switch-nvk (v15). ***"; exit 1; }
           echo "OK: array-resize fix present."
-          grep -q "P2FIX Properties2 wired" "$P" || { echo "*** MISSING P2FIX. Re-run Build switch-nvk (v15). ***"; exit 1; }
-          echo "OK: P2FIX present. Safe to build."
+          strings nvk-switch/lib/libvulkan.a | grep -qF "P2FIX Properties2 wired" || { echo "*** MISSING P2FIX in compiled NVK. Re-run Build switch-nvk (v15). ***"; exit 1; }
+          echo "OK: P2FIX compiled into NVK. Safe to build."
 
       - name: Clone tico-dolphin (with submodules)
         run: |
