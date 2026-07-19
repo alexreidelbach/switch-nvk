@@ -1,10 +1,11 @@
-# Build tico-dolphin (Wii online) — v5  *** THE 1.1 CAP FIX ***
-# ROOT CAUSE (machine-code verified): crash is a hardware fault at a garbage
-# function pointer during wsi_device_init's callback resolution. HayatoG's
-# loaderless static NVK was only ever validated at Vulkan 1.1 (through Dawn).
-# Dolphin requests 1.2, making WSI resolve 1.2 entrypoints whose trampolines
-# aren't wired in this static build -> garbage proc-addr -> blr garbage -> fault.
-# FIX: cap Dolphin's instance at Vulkan 1.1, matching the tested config.
+# Build tico-dolphin (Wii online) — v6  *** THE EXTENSION FIX ***
+# ROOT CAUSE (machine-code + working-app diff): crash is a call through an
+# UNINITIALIZED function pointer (fault address VARIES each boot) during
+# wsi_device_init's callback resolution. Dolphin enables instance extensions
+# (notably VK_KHR_get_surface_capabilities2) that the loaderless static NVK
+# does NOT wire WSI callbacks for. The working smoke apps enable ONLY
+# VK_KHR_surface + VK_NN_vi_surface. This build matches that: skip caps2 (and
+# cap the API at 1.1) on Switch.
 
 name: Build tico-dolphin
 
@@ -69,15 +70,11 @@ jobs:
         run: |
           set -e
           H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
-          if [ ! -f "$H" ]; then
-            echo "ERROR: wsi_common.h not found in the NVK build tree artifact."
-            exit 1
-          fi
+          if [ ! -f "$H" ]; then echo "ERROR: wsi_common.h missing"; exit 1; fi
           if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
-            echo "OK: NVK carries the array-resize fix. Safe to build."
+            echo "OK: NVK carries the array-resize fix."
           else
-            echo "*** MISSING array-resize fix. Re-run 'Build switch-nvk' first. ***"
-            exit 1
+            echo "*** MISSING array-resize fix. Re-run 'Build switch-nvk' first. ***"; exit 1
           fi
 
       - name: Clone tico-dolphin (with submodules)
@@ -91,19 +88,25 @@ jobs:
           git config user.name ci
           git apply --3way --whitespace=fix ../tico/wii-online.patch || \
             git apply --3way --whitespace=fix --reject ../tico/wii-online.patch
-          echo "=== applied (showing changed files) ==="
           git status --short
 
-      - name: "FIX: cap Vulkan instance at 1.1 (match tested NVK config)"
+      - name: "FIX 1: skip surface_capabilities2 on Switch (uninit proc-addr crash)"
         run: |
           set -e
           F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-          perl -0777 -pi -e 's/    if \(supported_version >= VK_API_VERSION_1_2\)\n      used_version = VK_API_VERSION_1_2;\n    else if \(supported_version >= VK_API_VERSION_1_1\)\n      used_version = VK_API_VERSION_1_1;/    \/* switch-nvk: cap at 1.1 (only tested config) *\/\n    if (supported_version >= VK_API_VERSION_1_1)\n      used_version = VK_API_VERSION_1_1;/' "$F"
-          echo "=== verifying the 1.2 path is gone ==="
-          if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then
-            echo "ERROR: 1.2 path still present — fix did not apply"; exit 1
-          fi
-          echo "OK: Dolphin will request Vulkan 1.1 max."
+          perl -0777 -pi -e 's/  if \(wstype != WindowSystemType::Headless\)\n  \{\n    AddExtension\(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false\);\n  \}/  \/* switch-nvk: caps2 WSI callbacks are unwired in the loaderless static NVK *\/\n  if (wstype != WindowSystemType::Headless \&\& wstype != WindowSystemType::Switch)\n  {\n    AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);\n  }/' "$F"
+          echo "=== verify caps2 is now gated off Switch ==="
+          grep -n "WindowSystemType::Switch" "$F" | head
+          grep -q "Headless && wstype != WindowSystemType::Switch" "$F" || { echo "ERROR: caps2 fix did not apply"; exit 1; }
+          echo "OK: caps2 skipped on Switch."
+
+      - name: "FIX 2: cap Vulkan instance at 1.1 (match tested NVK config)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          perl -0777 -pi -e 's/    if \(supported_version >= VK_API_VERSION_1_2\)\n      used_version = VK_API_VERSION_1_2;\n    else if \(supported_version >= VK_API_VERSION_1_1\)\n      used_version = VK_API_VERSION_1_1;/    if (supported_version >= VK_API_VERSION_1_1)\n      used_version = VK_API_VERSION_1_1;/' "$F"
+          if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then echo "ERROR: 1.2 path remains"; exit 1; fi
+          echo "OK: capped at Vulkan 1.1."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
@@ -114,7 +117,6 @@ jobs:
         run: |
           sed -i 's|static constexpr bool kNxLogEnabled = false;|static constexpr bool kNxLogEnabled = true;|' \
             tico-dolphin/Source/Core/DolphinNX/main.cpp
-          grep -n "kNxLogEnabled" tico-dolphin/Source/Core/DolphinNX/main.cpp
 
       - name: Add missing link libraries (curl, mbedtls, expat, EGL)
         run: |
