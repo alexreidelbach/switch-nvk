@@ -1,6 +1,10 @@
-# Build tico-dolphin (Wii online) — v4
-# VERIFY step now checks that the wsi[] array-resize FIX is present in the NVK
-# (the VK_ICD_WSI_PLATFORM_VI + 1 define), instead of the old debug markers.
+# Build tico-dolphin (Wii online) — v5  *** THE 1.1 CAP FIX ***
+# ROOT CAUSE (machine-code verified): crash is a hardware fault at a garbage
+# function pointer during wsi_device_init's callback resolution. HayatoG's
+# loaderless static NVK was only ever validated at Vulkan 1.1 (through Dawn).
+# Dolphin requests 1.2, making WSI resolve 1.2 entrypoints whose trampolines
+# aren't wired in this static build -> garbage proc-addr -> blr garbage -> fault.
+# FIX: cap Dolphin's instance at Vulkan 1.1, matching the tested config.
 
 name: Build tico-dolphin
 
@@ -65,18 +69,14 @@ jobs:
         run: |
           set -e
           H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
-          echo "Checking $H for the VI array-resize fix..."
           if [ ! -f "$H" ]; then
             echo "ERROR: wsi_common.h not found in the NVK build tree artifact."
-            echo "The NVK bundle may be from an older run. Re-run 'Build switch-nvk' first."
             exit 1
           fi
           if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
-            echo "OK: NVK carries the array-resize fix (VK_ICD_WSI_PLATFORM_VI + 1). Safe to build."
+            echo "OK: NVK carries the array-resize fix. Safe to build."
           else
-            echo "*** MISSING: the wsi[] array-resize fix is NOT in this NVK. ***"
-            echo "This NVK would crash with the out-of-bounds write. Re-run the FIXED"
-            echo "'Build switch-nvk' (v10) to green FIRST, then re-run this workflow."
+            echo "*** MISSING array-resize fix. Re-run 'Build switch-nvk' first. ***"
             exit 1
           fi
 
@@ -93,6 +93,17 @@ jobs:
             git apply --3way --whitespace=fix --reject ../tico/wii-online.patch
           echo "=== applied (showing changed files) ==="
           git status --short
+
+      - name: "FIX: cap Vulkan instance at 1.1 (match tested NVK config)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          perl -0777 -pi -e 's/    if \(supported_version >= VK_API_VERSION_1_2\)\n      used_version = VK_API_VERSION_1_2;\n    else if \(supported_version >= VK_API_VERSION_1_1\)\n      used_version = VK_API_VERSION_1_1;/    \/* switch-nvk: cap at 1.1 (only tested config) *\/\n    if (supported_version >= VK_API_VERSION_1_1)\n      used_version = VK_API_VERSION_1_1;/' "$F"
+          echo "=== verifying the 1.2 path is gone ==="
+          if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then
+            echo "ERROR: 1.2 path still present — fix did not apply"; exit 1
+          fi
+          echo "OK: Dolphin will request Vulkan 1.1 max."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
