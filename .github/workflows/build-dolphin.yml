@@ -105,24 +105,31 @@ jobs:
           if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then echo "ERROR: 1.2 path remains"; exit 1; fi
           echo "OK: capped at Vulkan 1.1."
 
-      - name: "NEW: instrument device creation (DEVEXT/DEVCREATE)"
+      - name: "NEW: instrument extension selection + device creation (DEVEXT/DEVCREATE)"
         run: |
           set -e
           F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-          # 0) sink declaration + helper, inserted immediately before SelectDeviceExtensions
-          perl -0777 -pi -e 's/(bool VulkanContext::SelectDeviceExtensions\(bool enable_surface\)\n\{)/extern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxDevLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$F"
-          # 1) log every advertised device extension
-          perl -0777 -pi -e 's/(  for \(const auto& extension_properties : available_extension_list\)\n    INFO_LOG_FMT\(VIDEO, "Available extension: \{\}", extension_properties\.extensionName\);)/$1\n  for (const auto& _e : available_extension_list) { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT avail %s\\n", _e.extensionName); NxDevLog(_b); }/' "$F"
-          # 2) log any missing extension Dolphin asks for
-          perl -0777 -pi -e 's/(    if \(required\)\n      ERROR_LOG_FMT\(VIDEO, "Vulkan: Missing required extension \{\}\.", name\);)/    { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT MISSING %s (required=%d)\\n", name, (int)required); NxDevLog(_b); }\n$1/' "$F"
+          # 0) helper at top of file, BEFORE both SelectInstanceExtensions and SelectDeviceExtensions
+          grep -q "^namespace Vulkan$" "$F" || { echo "ERROR: namespace anchor not found"; exit 1; }
+          perl -0777 -pi -e 's/(namespace Vulkan\n\{)/#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxDevLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$F"
+          # 1) log every advertised extension — BOTH instance and device lists (/g)
+          perl -0777 -pi -e 's/(  for \(const auto& extension_properties : available_extension_list\)\n    INFO_LOG_FMT\(VIDEO, "Available extension: \{\}", extension_properties\.extensionName\);)/$1\n  for (const auto& _e : available_extension_list) { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT avail %s\\n", _e.extensionName); NxDevLog(_b); }/g' "$F"
+          # 2) log any missing extension — BOTH lambdas (/g)
+          perl -0777 -pi -e 's/(    if \(required\)\n      ERROR_LOG_FMT\(VIDEO, "Vulkan: Missing required extension \{\}\.", name\);)/    { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT MISSING %s (required=%d)\\n", name, (int)required); NxDevLog(_b); }\n$1/g' "$F"
           # 3) log the vkCreateDevice VkResult
           perl -0777 -pi -e 's/(  VkResult res = vkCreateDevice\(m_physical_device, &device_info, nullptr, &m_device\);)/$1\n  { char _b[96]; snprintf(_b,sizeof _b,"DEVCREATE vkCreateDevice res=%d\\n",(int)res); NxDevLog(_b); }/' "$F"
-          echo "=== verify all four instrumentation points applied ==="
-          grep -q "NxDevLog" "$F" || { echo "ERROR: helper missing"; exit 1; }
-          grep -q "DEVEXT avail" "$F" || { echo "ERROR: avail log missing"; exit 1; }
-          grep -q "DEVEXT MISSING" "$F" || { echo "ERROR: missing-ext log missing"; exit 1; }
+          echo "=== verify instrumentation ==="
+          grep -q "static void NxDevLog" "$F" || { echo "ERROR: helper missing"; exit 1; }
+          A=$(grep -c "DEVEXT avail" "$F"); M=$(grep -c "DEVEXT MISSING" "$F")
+          echo "avail loops: $A (expect 2)  missing logs: $M (expect 2)"
+          [ "$A" = "2" ] || { echo "ERROR: avail count wrong"; exit 1; }
+          [ "$M" = "2" ] || { echo "ERROR: missing count wrong"; exit 1; }
           grep -q "DEVCREATE vkCreateDevice" "$F" || { echo "ERROR: result log missing"; exit 1; }
-          echo "OK: device-creation instrumentation in place."
+          # helper must appear BEFORE first use
+          HL=$(grep -n "static void NxDevLog" "$F" | head -1 | cut -d: -f1)
+          FU=$(grep -n "NxDevLog(_b)" "$F" | head -1 | cut -d: -f1)
+          [ "$HL" -lt "$FU" ] || { echo "ERROR: helper declared after first use"; exit 1; }
+          echo "OK: instrumentation in place (helper at line $HL, first use at line $FU)."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
