@@ -1,8 +1,11 @@
-# Cloud build for switch-nvk — v11  *** DEBUG SYMBOLS ***
-# Injects -g (keeping -O2 so codegen/timing is UNCHANGED) into the NVK cross
-# compile. This does NOT change behavior — it only adds DWARF line info so that
-# addr2line against dolphin-nx.debug.elf resolves the crash PC to an exact
-# file:line instead of just a function name. Keeps the array-resize fix too.
+# Cloud build for switch-nvk — v13  *** MEASURE THE REAL CRASH SITE ***
+# The wsi_common.c that actually compiles is HayatoG's version (apply-wsi-switch.sh
+# copies it over stock). This build instruments HIS wsi_device_init right between
+# callback resolution (WSI_GET_CB) and first use, logging all four resolved
+# pointers + proc_addr itself. The log names the garbage pointer directly.
+# NOTE: the v12 "proc-addr reroute" fix was DISPROVEN by source verification
+# (checked/unchecked return the same trampoline) and is intentionally absent.
+# Keeps: -g debug info, wsi[] array-resize fix.
 
 name: Build switch-nvk
 
@@ -42,13 +45,9 @@ jobs:
         run: |
           set -e
           X=crossfiles/switch.cross
-          echo "Before:"; grep -c "'-g'" "$X" || true
-          # Insert -g right after every -O2 (both c_args and cpp_args). Keeps -O2.
           perl -pi -e "s/'-O2','-ffunction-sections'/'-O2','-g','-ffunction-sections'/g" "$X"
-          echo "After ('-g' occurrences, expect 2):"
-          grep -c "'-g'" "$X"
           grep -q "'-O2','-g','-ffunction-sections'" "$X" || { echo "ERROR: -g not injected"; exit 1; }
-          echo "OK: debug line info enabled (behavior unchanged, -O2 kept)."
+          echo "OK: debug line info enabled."
 
       - name: "Phase 1: build native tools on PRISTINE tree (mesa_clc + precomp)"
         run: |
@@ -67,6 +66,8 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
 
+      # ---- ALL SOURCE EDITS RUN AFTER THE PATCH/COPY STEPS ----
+
       - name: "FORCE wsi[] array resize for VI platform (keep the fix)"
         run: |
           set -e
@@ -75,9 +76,20 @@ jobs:
             echo "Array already sized for VI."
           else
             perl -0777 -pi -e 's/#define VK_ICD_WSI_PLATFORM_MAX \(VK_ICD_WSI_PLATFORM_METAL \+ 1\)/#ifdef VK_USE_PLATFORM_VI_NN\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)\n#else\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)\n#endif/' "$H"
-            echo "FORCED the VI array resize."
           fi
-          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize still missing"; exit 1; }
+          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize missing"; exit 1; }
+          echo "OK: array resized."
+
+      - name: "Instrument wsi_device_init resolved callbacks (WSICB debug)"
+        run: |
+          set -e
+          F=mesa-25/src/vulkan/wsi/wsi_common.c
+          # Sanity: this must be HayatoG's version (has the 4-callback block)
+          grep -q "WSI_GET_CB(GetPhysicalDeviceQueueFamilyProperties);" "$F" || { echo "ERROR: expected WSI_GET_CB block not found"; exit 1; }
+          # Insert the pointer log right after the FIRST '#undef WSI_GET_CB'
+          perl -0777 -pi -e 's/(#undef WSI_GET_CB\n)/$1#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _w[192]; snprintf(_w,sizeof _w,"WSICB esp=%p p2=%p mem=%p qfp=%p pa=%p\\n",(void*)GetPhysicalDeviceExternalSemaphoreProperties,(void*)GetPhysicalDeviceProperties2,(void*)GetPhysicalDeviceMemoryProperties,(void*)GetPhysicalDeviceQueueFamilyProperties,(void*)proc_addr); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_w); }\n#endif\n/' "$F"
+          echo "WSICB marker count (expect 1):"
+          grep -c "WSICB" "$F"
 
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
@@ -163,5 +175,5 @@ jobs:
           name: meson-logs
           path: |
             mb/meson-logs/
-            native-tools/meson-logs/
+            nvk-build-tree/
           retention-days: 7
