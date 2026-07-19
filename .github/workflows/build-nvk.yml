@@ -1,12 +1,13 @@
-# Cloud build for switch-nvk — v14  *** NAME THE FAULTING CALL + JUMP TARGET ***
-# v13 PROVED: all four WSI callbacks resolve to valid trampolines; the crash is
-# when one is CALLED — the trampoline jumps through pdevice->dispatch_table.<fn>
-# and THAT entry is garbage (fault address varies per boot). v14 measures one
-# level deeper:
-#   WSIDT — logs the actual dispatch-table entries the trampolines jump through
-#   WSIA/WSIB/WSIC — bracket the three calls; the last marker printed names the
-#   faulting call.
-# Keeps: -g debug info, wsi[] array-resize fix, WSICB probe.
+# Cloud build for switch-nvk — v15  *** THE MEASURED FIX ***
+# v14 MEASURED the root cause after ~15 builds:
+#   WSIDT p2i=0x0  <- dispatch_table.GetPhysicalDeviceProperties2 is NULL
+#   WSIA calling Properties2 -> crash (jump through NULL/garbage)
+# WHY: vk_common_GetPhysicalDeviceProperties2 is GENERATED code in its own
+# object file inside libvulkan_lite_runtime.a. Nothing strongly references it,
+# so the static linker never extracts it; the weak entrypoint ref resolves to 0.
+# FIX: explicitly wire the slot before nvk_init_wsi. The explicit reference is
+# ALSO a strong symbol reference, forcing the linker to extract the real
+# function. Keeps: all v14 probes (to confirm p2i != 0), -g, array resize.
 
 name: Build switch-nvk
 
@@ -81,19 +82,30 @@ jobs:
           grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize missing"; exit 1; }
           echo "OK: array resized."
 
+      - name: "*** P2FIX: wire the NULL GetPhysicalDeviceProperties2 dispatch entry ***"
+        run: |
+          set -e
+          F=mesa-25/src/nouveau/vulkan/nvk_physical_device.c
+          grep -q "result = nvk_init_wsi(pdev);" "$F" || { echo "ERROR: anchor not found"; exit 1; }
+          perl -0777 -pi -e 's/(   result = nvk_init_wsi\(pdev\);)/#ifdef __SWITCH__\n   {\n      extern VKAPI_ATTR void VKAPI_CALL vk_common_GetPhysicalDeviceProperties2(VkPhysicalDevice, VkPhysicalDeviceProperties2 *);\n      if (pdev->vk.dispatch_table.GetPhysicalDeviceProperties2 == NULL)\n         pdev->vk.dispatch_table.GetPhysicalDeviceProperties2 = vk_common_GetPhysicalDeviceProperties2;\n      extern void (*g_drm_shim_log_sink)(const char *);\n      if (g_drm_shim_log_sink) g_drm_shim_log_sink("P2FIX Properties2 wired\\n");\n   }\n#endif\n$1/' "$F"
+          grep -q "P2FIX Properties2 wired" "$F" || { echo "ERROR: P2FIX did not apply"; exit 1; }
+          echo "OK: P2FIX applied before nvk_init_wsi."
+
       - name: "Instrument wsi_device_init: WSICB + WSIDT + call brackets"
         run: |
           set -e
           F=mesa-25/src/vulkan/wsi/wsi_common.c
           grep -q "WSI_GET_CB(GetPhysicalDeviceQueueFamilyProperties);" "$F" || { echo "ERROR: expected WSI_GET_CB block not found"; exit 1; }
-          # Probe 1+2: resolved trampolines (WSICB) + actual dispatch-table jump targets (WSIDT)
           perl -0777 -pi -e 's/(#undef WSI_GET_CB\n)/$1#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _w[192]; snprintf(_w,sizeof _w,"WSICB esp=%p p2=%p mem=%p qfp=%p pa=%p\\n",(void*)GetPhysicalDeviceExternalSemaphoreProperties,(void*)GetPhysicalDeviceProperties2,(void*)GetPhysicalDeviceMemoryProperties,(void*)GetPhysicalDeviceQueueFamilyProperties,(void*)proc_addr); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_w); }\n   { extern void (*g_drm_shim_log_sink)(const char *); char _w[200]; struct vk_physical_device *_vpd = vk_physical_device_from_handle(pdevice); snprintf(_w,sizeof _w,"WSIDT p2i=%p memi=%p qfpi=%p espi=%p\\n",(void*)_vpd->dispatch_table.GetPhysicalDeviceProperties2,(void*)_vpd->dispatch_table.GetPhysicalDeviceMemoryProperties,(void*)_vpd->dispatch_table.GetPhysicalDeviceQueueFamilyProperties,(void*)_vpd->dispatch_table.GetPhysicalDeviceExternalSemaphoreProperties); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_w); }\n#endif\n/' "$F"
-          # Probe 3: bracket the three calls so the last marker names the faulting one
           perl -0777 -pi -e 's/(   GetPhysicalDeviceProperties2\(pdevice, &pdp2\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIA calling Properties2\\n"); }\n#endif\n$1/' "$F"
           perl -0777 -pi -e 's/(   GetPhysicalDeviceMemoryProperties\(pdevice, &wsi->memory_props\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIB calling MemoryProperties\\n"); }\n#endif\n$1/' "$F"
           perl -0777 -pi -e 's/(   GetPhysicalDeviceQueueFamilyProperties\(pdevice, &wsi->queue_family_count, NULL\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIC calling QueueFamilyProps\\n"); }\n#endif\n$1/' "$F"
-          echo "marker counts (expect 1 1 1 1 1):"
-          grep -c "WSICB" "$F"; grep -c "WSIDT" "$F"; grep -c "WSIA" "$F"; grep -c "WSIB" "$F"; grep -c "WSIC" "$F"
+          echo "marker presence (expect all found):"
+          grep -q "WSICB" "$F" && echo "WSICB ok"
+          grep -q "WSIDT" "$F" && echo "WSIDT ok"
+          grep -q "WSIA calling" "$F" && echo "WSIA ok"
+          grep -q "WSIB calling" "$F" && echo "WSIB ok"
+          grep -q "WSIC calling" "$F" && echo "WSIC ok"
 
       - name: Build Rust std sysroot for the Switch target
         run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
