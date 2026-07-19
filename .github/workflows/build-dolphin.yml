@@ -1,11 +1,12 @@
-# Build tico-dolphin (Wii online) — v6  *** THE EXTENSION FIX ***
-# ROOT CAUSE (machine-code + working-app diff): crash is a call through an
-# UNINITIALIZED function pointer (fault address VARIES each boot) during
-# wsi_device_init's callback resolution. Dolphin enables instance extensions
-# (notably VK_KHR_get_surface_capabilities2) that the loaderless static NVK
-# does NOT wire WSI callbacks for. The working smoke apps enable ONLY
-# VK_KHR_surface + VK_NN_vi_surface. This build matches that: skip caps2 (and
-# cap the API at 1.1) on Switch.
+# Build tico-dolphin (Wii online) — v7  *** NAME THE DEVICE-CREATION FAILURE ***
+# v15 NVK + v6 Dolphin BROKE THROUGH: WSI init completes, GPU enumerates,
+# Mario Kart boots to "Failed to create Vulkan device" (clean VkResult failure).
+# v7 adds instrumentation to name the exact cause:
+#   DEVEXT avail <name>      — every device extension NVK advertises
+#   DEVEXT MISSING <name>    — any extension Dolphin wants that NVK lacks
+#   DEVCREATE res=<n>        — the actual vkCreateDevice VkResult
+# Everything else identical to v6 (caps2 skip + 1.1 cap kept — that config works).
+# Reuses the current v15 NVK — no NVK rebuild needed.
 
 name: Build tico-dolphin
 
@@ -66,16 +67,15 @@ jobs:
           cp nvk-switch/lib/libvulkan.a mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
           ls -lh mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
 
-      - name: VERIFY the NVK contains the wsi[] array-resize FIX
+      - name: VERIFY the NVK carries the array-resize fix AND P2FIX
         run: |
           set -e
           H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
-          if [ ! -f "$H" ]; then echo "ERROR: wsi_common.h missing"; exit 1; fi
-          if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
-            echo "OK: NVK carries the array-resize fix."
-          else
-            echo "*** MISSING array-resize fix. Re-run 'Build switch-nvk' first. ***"; exit 1
-          fi
+          P=nvk-build-tree/mesa-25/src/nouveau/vulkan/nvk_physical_device.c
+          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "*** MISSING array-resize fix. Re-run Build switch-nvk (v15). ***"; exit 1; }
+          echo "OK: array-resize fix present."
+          grep -q "P2FIX Properties2 wired" "$P" || { echo "*** MISSING P2FIX. Re-run Build switch-nvk (v15). ***"; exit 1; }
+          echo "OK: P2FIX present. Safe to build."
 
       - name: Clone tico-dolphin (with submodules)
         run: |
@@ -90,23 +90,40 @@ jobs:
             git apply --3way --whitespace=fix --reject ../tico/wii-online.patch
           git status --short
 
-      - name: "FIX 1: skip surface_capabilities2 on Switch (uninit proc-addr crash)"
+      - name: "FIX 1: skip surface_capabilities2 on Switch (kept from v6)"
         run: |
           set -e
           F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-          perl -0777 -pi -e 's/  if \(wstype != WindowSystemType::Headless\)\n  \{\n    AddExtension\(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false\);\n  \}/  \/* switch-nvk: caps2 WSI callbacks are unwired in the loaderless static NVK *\/\n  if (wstype != WindowSystemType::Headless \&\& wstype != WindowSystemType::Switch)\n  {\n    AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);\n  }/' "$F"
-          echo "=== verify caps2 is now gated off Switch ==="
-          grep -n "WindowSystemType::Switch" "$F" | head
+          perl -0777 -pi -e 's/  if \(wstype != WindowSystemType::Headless\)\n  \{\n    AddExtension\(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false\);\n  \}/  if (wstype != WindowSystemType::Headless \&\& wstype != WindowSystemType::Switch)\n  {\n    AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);\n  }/' "$F"
           grep -q "Headless && wstype != WindowSystemType::Switch" "$F" || { echo "ERROR: caps2 fix did not apply"; exit 1; }
           echo "OK: caps2 skipped on Switch."
 
-      - name: "FIX 2: cap Vulkan instance at 1.1 (match tested NVK config)"
+      - name: "FIX 2: cap Vulkan instance at 1.1 (kept from v6)"
         run: |
           set -e
           F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
           perl -0777 -pi -e 's/    if \(supported_version >= VK_API_VERSION_1_2\)\n      used_version = VK_API_VERSION_1_2;\n    else if \(supported_version >= VK_API_VERSION_1_1\)\n      used_version = VK_API_VERSION_1_1;/    if (supported_version >= VK_API_VERSION_1_1)\n      used_version = VK_API_VERSION_1_1;/' "$F"
           if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then echo "ERROR: 1.2 path remains"; exit 1; fi
           echo "OK: capped at Vulkan 1.1."
+
+      - name: "NEW: instrument device creation (DEVEXT/DEVCREATE)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          # 0) sink declaration + helper, inserted immediately before SelectDeviceExtensions
+          perl -0777 -pi -e 's/(bool VulkanContext::SelectDeviceExtensions\(bool enable_surface\)\n\{)/extern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxDevLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$F"
+          # 1) log every advertised device extension
+          perl -0777 -pi -e 's/(  for \(const auto& extension_properties : available_extension_list\)\n    INFO_LOG_FMT\(VIDEO, "Available extension: \{\}", extension_properties\.extensionName\);)/$1\n  for (const auto& _e : available_extension_list) { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT avail %s\\n", _e.extensionName); NxDevLog(_b); }/' "$F"
+          # 2) log any missing extension Dolphin asks for
+          perl -0777 -pi -e 's/(    if \(required\)\n      ERROR_LOG_FMT\(VIDEO, "Vulkan: Missing required extension \{\}\.", name\);)/    { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT MISSING %s (required=%d)\\n", name, (int)required); NxDevLog(_b); }\n$1/' "$F"
+          # 3) log the vkCreateDevice VkResult
+          perl -0777 -pi -e 's/(  VkResult res = vkCreateDevice\(m_physical_device, &device_info, nullptr, &m_device\);)/$1\n  { char _b[96]; snprintf(_b,sizeof _b,"DEVCREATE vkCreateDevice res=%d\\n",(int)res); NxDevLog(_b); }/' "$F"
+          echo "=== verify all four instrumentation points applied ==="
+          grep -q "NxDevLog" "$F" || { echo "ERROR: helper missing"; exit 1; }
+          grep -q "DEVEXT avail" "$F" || { echo "ERROR: avail log missing"; exit 1; }
+          grep -q "DEVEXT MISSING" "$F" || { echo "ERROR: missing-ext log missing"; exit 1; }
+          grep -q "DEVCREATE vkCreateDevice" "$F" || { echo "ERROR: result log missing"; exit 1; }
+          echo "OK: device-creation instrumentation in place."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
