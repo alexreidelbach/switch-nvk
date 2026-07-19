@@ -1,195 +1,184 @@
-# Cloud build for switch-nvk — v15  *** THE MEASURED FIX ***
-# v14 MEASURED the root cause after ~15 builds:
-#   WSIDT p2i=0x0  <- dispatch_table.GetPhysicalDeviceProperties2 is NULL
-#   WSIA calling Properties2 -> crash (jump through NULL/garbage)
-# WHY: vk_common_GetPhysicalDeviceProperties2 is GENERATED code in its own
-# object file inside libvulkan_lite_runtime.a. Nothing strongly references it,
-# so the static linker never extracts it; the weak entrypoint ref resolves to 0.
-# FIX: explicitly wire the slot before nvk_init_wsi. The explicit reference is
-# ALSO a strong symbol reference, forcing the linker to extract the real
-# function. Keeps: all v14 probes (to confirm p2i != 0), -g, array resize.
+# Build tico-dolphin (Wii online) — v7  *** NAME THE DEVICE-CREATION FAILURE ***
+# v15 NVK + v6 Dolphin BROKE THROUGH: WSI init completes, GPU enumerates,
+# Mario Kart boots to "Failed to create Vulkan device" (clean VkResult failure).
+# v7 adds instrumentation to name the exact cause:
+#   DEVEXT avail <name>      — every device extension NVK advertises
+#   DEVEXT MISSING <name>    — any extension Dolphin wants that NVK lacks
+#   DEVCREATE res=<n>        — the actual vkCreateDevice VkResult
+# Everything else identical to v6 (caps2 skip + 1.1 cap kept — that config works).
+# Reuses the current v15 NVK — no NVK rebuild needed.
 
-name: Build switch-nvk
+name: Build tico-dolphin
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - ".github/workflows/build-nvk.yml"
+      - ".github/workflows/build-dolphin.yml"
+      - "tico/wii-online.patch"
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 180
     steps:
-      - name: Checkout
+      - name: Checkout (for the patch file)
         uses: actions/checkout@v4
 
-      - name: Free up disk space
+      - name: Find latest successful NVK build
+        id: nvk
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          df -h /
-
-      - name: Build toolchain Docker image
-        run: docker build -t switch-nvk-build -f Dockerfile .
-
-      - name: Fetch Mesa 25.0.7
-        run: |
-          curl -L -o mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
-          tar xf mesa.tar.xz
-          mv mesa-25.0.7 mesa-25
-          rm mesa.tar.xz
-
-      - name: Fix script permissions
-        run: find . -name "*.sh" -exec chmod +x {} +
-
-      - name: "Add -g debug line info to the NVK cross compile"
-        run: |
-          set -e
-          X=crossfiles/switch.cross
-          perl -pi -e "s/'-O2','-ffunction-sections'/'-O2','-g','-ffunction-sections'/g" "$X"
-          grep -q "'-O2','-g','-ffunction-sections'" "$X" || { echo "ERROR: -g not injected"; exit 1; }
-          echo "OK: debug line info enabled."
-
-      - name: "Phase 1: build native tools on PRISTINE tree (mesa_clc + precomp)"
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
-            set -e
-            export NATIVE_PREFIX=/work/native-prefix
-            bash /work/build-native-tools.sh
-            echo "=== verify mesa_clc ==="
-            ls -la /work/native-prefix/bin/
-            test -x /work/native-prefix/bin/mesa_clc
-          '
-
-      - name: Apply Switch patches + WSI backend
-        run: |
-          set -e
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/apply-patches.sh
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/winsys/wsi/apply-wsi-switch.sh
-
-      # ---- ALL SOURCE EDITS RUN AFTER THE PATCH/COPY STEPS ----
-
-      - name: "FORCE wsi[] array resize for VI platform (keep the fix)"
-        run: |
-          set -e
-          H=mesa-25/src/vulkan/wsi/wsi_common.h
-          if grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H"; then
-            echo "Array already sized for VI."
-          else
-            perl -0777 -pi -e 's/#define VK_ICD_WSI_PLATFORM_MAX \(VK_ICD_WSI_PLATFORM_METAL \+ 1\)/#ifdef VK_USE_PLATFORM_VI_NN\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)\n#else\n#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)\n#endif/' "$H"
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Build switch-nvk" --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No successful 'Build switch-nvk' run found."
+            exit 1
           fi
-          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "ERROR: resize missing"; exit 1; }
-          echo "OK: array resized."
+          echo "Using NVK run id: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
-      - name: "*** P2FIX: wire the NULL GetPhysicalDeviceProperties2 dispatch entry ***"
-        run: |
-          set -e
-          F=mesa-25/src/nouveau/vulkan/nvk_physical_device.c
-          grep -q "result = nvk_init_wsi(pdev);" "$F" || { echo "ERROR: anchor not found"; exit 1; }
-          perl -0777 -pi -e 's/(   result = nvk_init_wsi\(pdev\);)/#ifdef __SWITCH__\n   {\n      extern VKAPI_ATTR void VKAPI_CALL vk_common_GetPhysicalDeviceProperties2(VkPhysicalDevice, VkPhysicalDeviceProperties2 *);\n      if (pdev->vk.dispatch_table.GetPhysicalDeviceProperties2 == NULL)\n         pdev->vk.dispatch_table.GetPhysicalDeviceProperties2 = vk_common_GetPhysicalDeviceProperties2;\n      extern void (*g_drm_shim_log_sink)(const char *);\n      if (g_drm_shim_log_sink) g_drm_shim_log_sink("P2FIX Properties2 wired\\n");\n   }\n#endif\n$1/' "$F"
-          grep -q "P2FIX Properties2 wired" "$F" || { echo "ERROR: P2FIX did not apply"; exit 1; }
-          echo "OK: P2FIX applied before nvk_init_wsi."
-
-      - name: "Instrument wsi_device_init: WSICB + WSIDT + call brackets"
-        run: |
-          set -e
-          F=mesa-25/src/vulkan/wsi/wsi_common.c
-          grep -q "WSI_GET_CB(GetPhysicalDeviceQueueFamilyProperties);" "$F" || { echo "ERROR: expected WSI_GET_CB block not found"; exit 1; }
-          perl -0777 -pi -e 's/(#undef WSI_GET_CB\n)/$1#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _w[192]; snprintf(_w,sizeof _w,"WSICB esp=%p p2=%p mem=%p qfp=%p pa=%p\\n",(void*)GetPhysicalDeviceExternalSemaphoreProperties,(void*)GetPhysicalDeviceProperties2,(void*)GetPhysicalDeviceMemoryProperties,(void*)GetPhysicalDeviceQueueFamilyProperties,(void*)proc_addr); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_w); }\n   { extern void (*g_drm_shim_log_sink)(const char *); char _w[200]; struct vk_physical_device *_vpd = vk_physical_device_from_handle(pdevice); snprintf(_w,sizeof _w,"WSIDT p2i=%p memi=%p qfpi=%p espi=%p\\n",(void*)_vpd->dispatch_table.GetPhysicalDeviceProperties2,(void*)_vpd->dispatch_table.GetPhysicalDeviceMemoryProperties,(void*)_vpd->dispatch_table.GetPhysicalDeviceQueueFamilyProperties,(void*)_vpd->dispatch_table.GetPhysicalDeviceExternalSemaphoreProperties); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_w); }\n#endif\n/' "$F"
-          perl -0777 -pi -e 's/(   GetPhysicalDeviceProperties2\(pdevice, &pdp2\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIA calling Properties2\\n"); }\n#endif\n$1/' "$F"
-          perl -0777 -pi -e 's/(   GetPhysicalDeviceMemoryProperties\(pdevice, &wsi->memory_props\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIB calling MemoryProperties\\n"); }\n#endif\n$1/' "$F"
-          perl -0777 -pi -e 's/(   GetPhysicalDeviceQueueFamilyProperties\(pdevice, &wsi->queue_family_count, NULL\);)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("WSIC calling QueueFamilyProps\\n"); }\n#endif\n$1/' "$F"
-          echo "marker presence (expect all found):"
-          grep -q "WSICB" "$F" && echo "WSICB ok"
-          grep -q "WSIDT" "$F" && echo "WSIDT ok"
-          grep -q "WSIA calling" "$F" && echo "WSIA ok"
-          grep -q "WSIB calling" "$F" && echo "WSIB ok"
-          grep -q "WSIC calling" "$F" && echo "WSIC ok"
-
-      - name: Build Rust std sysroot for the Switch target
-        run: docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash /work/build-std-sysroot.sh
-
-      - name: "Phase 2: cross-configure Mesa NVK for Switch"
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
-            set -e
-            export NATIVE_PREFIX=/work/native-prefix
-            export PATH=/work/native-prefix/bin:$PATH
-            export BUILD=/work/mb
-            bash /work/configure-mesa.sh
-          '
-
-      - name: "Phase 3: compile (ninja, tolerating the .so link failure)"
-        run: |
-          docker run --rm -v "$PWD:/work" -w /work/mesa-25 switch-nvk-build bash -lc '
-            export PATH=/work/native-prefix/bin:$PATH
-            ninja -C /work/mb -k 0 || echo "ninja reported failures (expected: the .so ICD link) — verifying static archives instead"
-            echo "=== verifying the archives package-nvk.sh needs ==="
-            fail=0
-            for a in \
-              src/nouveau/vulkan/libnvk.a \
-              src/nouveau/codegen/libnouveau_codegen.a \
-              src/util/libmesa_util.a src/util/libmesa_util_sse41.a src/util/blake3/libblake3.a \
-              src/c11/impl/libmesa_util_c11.a \
-              src/nouveau/compiler/libnak.a src/nouveau/compiler/libnak_rs.a \
-              src/compiler/rust/libcompiler_c_helpers.a \
-              src/nouveau/headers/libnvidia_headers_c.a \
-              src/nouveau/nil/liblibnil.a src/nouveau/nil/liblibnil_format_table.a \
-              src/compiler/nir/libnir.a src/compiler/libcompiler.a \
-              src/nouveau/mme/libnouveau_mme.a src/nouveau/winsys/libnouveau_ws.a \
-              src/vulkan/util/libvulkan_util.a src/compiler/spirv/libvtn.a \
-              src/util/libxmlconfig.a ; do
-              if [ -f "/work/mb/$a" ]; then echo "OK  $a"; else echo "MISSING  $a"; fail=1; fi
-            done
-            exit $fail
-          '
-
-      - name: Package nvk-switch install tree (with shim debug logging)
-        run: |
-          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g -DDRM_SHIM_DEBUG|' package-nvk.sh
-          grep -n "drm_shim.c" package-nvk.sh
-          docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
-
-      - name: Bundle MESA_NVK_DIR tree for tico-dolphin
-        run: |
-          set -e
-          mkdir -p nvk-build-tree/mb
-          mkdir -p nvk-build-tree/mesa-25/include nvk-build-tree/mesa-25/src
-          rsync -a --include='*/' --include='*.a' --exclude='*' mb/ nvk-build-tree/mb/
-          rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/include/ nvk-build-tree/mesa-25/include/
-          rsync -a --include='*/' --include='*.h' --include='*.hpp' --exclude='*' mesa-25/src/ nvk-build-tree/mesa-25/src/
-          tar -I 'gzip -6' -cf nvk-build-tree.tar.gz nvk-build-tree
-          ls -lh nvk-build-tree.tar.gz
-
-      - name: Upload nvk-switch package
-        uses: actions/upload-artifact@v4
-        with:
-          name: nvk-switch
-          path: nvk-switch/
-          retention-days: 30
-
-      - name: Upload MESA_NVK_DIR build tree
-        uses: actions/upload-artifact@v4
+      - name: Download NVK build tree
+        uses: actions/download-artifact@v4
         with:
           name: nvk-build-tree
-          path: nvk-build-tree.tar.gz
-          retention-days: 30
+          run-id: ${{ steps.nvk.outputs.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Show build logs on failure
-        if: failure()
+      - name: Download nvk-switch package
+        uses: actions/download-artifact@v4
+        with:
+          name: nvk-switch
+          path: nvk-switch
+          run-id: ${{ steps.nvk.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Synthesize MESA_NVK_DIR layout
         run: |
-          echo "=========== native tools meson log (tail) ==========="
-          tail -n 80 native-tools/meson-logs/meson-log.txt 2>/dev/null || echo "(none)"
-          echo "=========== cross build meson log (tail) ==========="
-          tail -n 120 mb/meson-logs/meson-log.txt 2>/dev/null || echo "(none)"
+          set -e
+          tar xf nvk-build-tree.tar.gz
+          mkdir -p mesa-tree
+          cp -r nvk-build-tree/mesa-25/include mesa-tree/include
+          cp -r nvk-build-tree/mb mesa-tree/nvk-build
+          cp nvk-switch/lib/libvulkan.a mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
+          ls -lh mesa-tree/nvk-build/src/nouveau/vulkan/libvulkan.a
 
-      - name: Upload meson logs on failure
-        if: failure()
+      - name: VERIFY the NVK carries the array-resize fix AND P2FIX
+        run: |
+          set -e
+          H=nvk-build-tree/mesa-25/src/vulkan/wsi/wsi_common.h
+          grep -q "VK_ICD_WSI_PLATFORM_VI + 1" "$H" || { echo "*** MISSING array-resize fix. Re-run Build switch-nvk (v15). ***"; exit 1; }
+          echo "OK: array-resize fix present."
+          strings nvk-switch/lib/libvulkan.a | grep -qF "P2FIX Properties2 wired" || { echo "*** MISSING P2FIX in compiled NVK. Re-run Build switch-nvk (v15). ***"; exit 1; }
+          echo "OK: P2FIX compiled into NVK. Safe to build."
+
+      - name: Clone tico-dolphin (with submodules)
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules -j8 https://github.com/ticohq/tico-dolphin.git
+
+      - name: Apply Wii online networking patch
+        run: |
+          cd tico-dolphin
+          git config user.email ci@local
+          git config user.name ci
+          git apply --3way --whitespace=fix ../tico/wii-online.patch || \
+            git apply --3way --whitespace=fix --reject ../tico/wii-online.patch
+          git status --short
+
+      - name: "FIX 1: skip surface_capabilities2 on Switch (kept from v6)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          perl -0777 -pi -e 's/  if \(wstype != WindowSystemType::Headless\)\n  \{\n    AddExtension\(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false\);\n  \}/  if (wstype != WindowSystemType::Headless \&\& wstype != WindowSystemType::Switch)\n  {\n    AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);\n  }/' "$F"
+          grep -q "Headless && wstype != WindowSystemType::Switch" "$F" || { echo "ERROR: caps2 fix did not apply"; exit 1; }
+          echo "OK: caps2 skipped on Switch."
+
+      - name: "FIX 2: cap Vulkan instance at 1.1 (kept from v6)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          perl -0777 -pi -e 's/    if \(supported_version >= VK_API_VERSION_1_2\)\n      used_version = VK_API_VERSION_1_2;\n    else if \(supported_version >= VK_API_VERSION_1_1\)\n      used_version = VK_API_VERSION_1_1;/    if (supported_version >= VK_API_VERSION_1_1)\n      used_version = VK_API_VERSION_1_1;/' "$F"
+          if grep -q "used_version = VK_API_VERSION_1_2;" "$F"; then echo "ERROR: 1.2 path remains"; exit 1; fi
+          echo "OK: capped at Vulkan 1.1."
+
+      - name: "NEW: instrument extension selection + device creation (DEVEXT/DEVCREATE)"
+        run: |
+          set -e
+          F=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+          # 0) helper at top of file, BEFORE both SelectInstanceExtensions and SelectDeviceExtensions
+          grep -q "^namespace Vulkan$" "$F" || { echo "ERROR: namespace anchor not found"; exit 1; }
+          perl -0777 -pi -e 's/(namespace Vulkan\n\{)/#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxDevLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$F"
+          # 1) log every advertised extension — BOTH instance and device lists (/g)
+          perl -0777 -pi -e 's/(  for \(const auto& extension_properties : available_extension_list\)\n    INFO_LOG_FMT\(VIDEO, "Available extension: \{\}", extension_properties\.extensionName\);)/$1\n  for (const auto& _e : available_extension_list) { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT avail %s\\n", _e.extensionName); NxDevLog(_b); }/g' "$F"
+          # 2) log any missing extension — BOTH lambdas (/g)
+          perl -0777 -pi -e 's/(    if \(required\)\n      ERROR_LOG_FMT\(VIDEO, "Vulkan: Missing required extension \{\}\.", name\);)/    { char _b[160]; snprintf(_b,sizeof _b,"DEVEXT MISSING %s (required=%d)\\n", name, (int)required); NxDevLog(_b); }\n$1/g' "$F"
+          # 3) log the vkCreateDevice VkResult
+          perl -0777 -pi -e 's/(  VkResult res = vkCreateDevice\(m_physical_device, &device_info, nullptr, &m_device\);)/$1\n  { char _b[96]; snprintf(_b,sizeof _b,"DEVCREATE vkCreateDevice res=%d\\n",(int)res); NxDevLog(_b); }/' "$F"
+          echo "=== verify instrumentation ==="
+          grep -q "static void NxDevLog" "$F" || { echo "ERROR: helper missing"; exit 1; }
+          A=$(grep -c "DEVEXT avail" "$F"); M=$(grep -c "DEVEXT MISSING" "$F")
+          echo "avail loops: $A (expect 2)  missing logs: $M (expect 2)"
+          [ "$A" = "2" ] || { echo "ERROR: avail count wrong"; exit 1; }
+          [ "$M" = "2" ] || { echo "ERROR: missing count wrong"; exit 1; }
+          grep -q "DEVCREATE vkCreateDevice" "$F" || { echo "ERROR: result log missing"; exit 1; }
+          # helper must appear BEFORE first use
+          HL=$(grep -n "static void NxDevLog" "$F" | head -1 | cut -d: -f1)
+          FU=$(grep -n "NxDevLog(_b)" "$F" | head -1 | cut -d: -f1)
+          [ "$HL" -lt "$FU" ] || { echo "ERROR: helper declared after first use"; exit 1; }
+          echo "OK: instrumentation in place (helper at line $HL, first use at line $FU)."
+          # 4) VulkanLoader.cpp: name every null REQUIRED function (device + instance loaders)
+          L=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
+          grep -q "^namespace Vulkan$" "$L" || { echo "ERROR: loader namespace anchor not found"; exit 1; }
+          perl -0777 -pi -e 's/(namespace Vulkan\n\{)/#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxLdrLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$L"
+          perl -0777 -pi -e 's/(      ERROR_LOG_FMT\(HOST_GPU, "Vulkan: Failed to load required device function \{\}", name\);)/      { char _b[160]; snprintf(_b,sizeof _b,"DEVFN MISSING %s\\n", name); NxLdrLog(_b); }\n$1/' "$L"
+          perl -0777 -pi -e 's/(      ERROR_LOG_FMT\(HOST_GPU, "Vulkan: Failed to load required instance function \{\}", name\);)/      { char _b[160]; snprintf(_b,sizeof _b,"INSTFN MISSING %s\\n", name); NxLdrLog(_b); }\n$1/' "$L"
+          grep -q "DEVFN MISSING" "$L" || { echo "ERROR: device-loader probe missing"; exit 1; }
+          grep -q "INSTFN MISSING" "$L" || { echo "ERROR: instance-loader probe missing"; exit 1; }
+          echo "OK: loader probes in place (DEVFN/INSTFN)."
+
+      - name: Add linker wrap flags required by the NVK fat lib
+        run: |
+          sed -i 's|switch.specs"|switch.specs -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=stat -Wl,--wrap=lstat"|' \
+            tico-dolphin/Source/Core/DolphinNX/nx-toolchain.cmake
+
+      - name: Enable Dan's boot log (debug build)
+        run: |
+          sed -i 's|static constexpr bool kNxLogEnabled = false;|static constexpr bool kNxLogEnabled = true;|' \
+            tico-dolphin/Source/Core/DolphinNX/main.cpp
+
+      - name: Add missing link libraries (curl, mbedtls, expat, EGL)
+        run: |
+          set -e
+          CM=tico-dolphin/Source/Core/DolphinNX/CMakeLists.txt
+          sed -i 's|-ldrm_nouveau|-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lexpat -ldrm_nouveau|' "$CM"
+          sed -i 's|${DEVKITPRO}/portlibs/switch/lib/libSDL2.a|${DEVKITPRO}/portlibs/switch/lib/libSDL2.a ${DEVKITPRO}/portlibs/switch/lib/libEGL.a ${DEVKITPRO}/portlibs/switch/lib/libglapi.a|' "$CM"
+          grep -n "lcurl\|libEGL" "$CM"
+
+      - name: Build dolphin.nro
+        run: |
+          docker run --rm -v "$PWD:/ws" -w /ws/tico-dolphin devkitpro/devkita64:latest bash -lc '
+            set -e
+            apt-get update -qq && apt-get install -y -qq cmake ninja-build rsync >/dev/null
+            dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-libdrm_nouveau switch-zstd switch-zlib switch-curl switch-mbedtls switch-mesa || true
+            dkp-pacman -S --noconfirm --needed switch-libexpat || dkp-pacman -S --noconfirm --needed switch-expat || true
+            export MESA_NVK_DIR=/ws/mesa-tree/nvk-build
+            bash build_dolphin_standalone_nro.sh
+          '
+
+      - name: Upload dolphin.nro
         uses: actions/upload-artifact@v4
         with:
-          name: meson-logs
+          name: dolphin-nro
           path: |
-            mb/meson-logs/
-            native-tools/meson-logs/
-          retention-days: 7
+            tico-dolphin/build_nx_standalone/dolphin.nro
+            tico-dolphin/build_nx_standalone/Binaries/dolphin-nx.debug.elf
+          retention-days: 30
+
+      - name: Show CMake logs on failure
+        if: failure()
+        run: |
+          tail -n 150 tico-dolphin/build_nx_standalone/CMakeFiles/CMakeError.log 2>/dev/null || echo "(no CMakeError.log)"
