@@ -130,6 +130,15 @@ jobs:
           FU=$(grep -n "NxDevLog(_b)" "$F" | head -1 | cut -d: -f1)
           [ "$HL" -lt "$FU" ] || { echo "ERROR: helper declared after first use"; exit 1; }
           echo "OK: instrumentation in place (helper at line $HL, first use at line $FU)."
+          # 4) VulkanLoader.cpp: name every null REQUIRED function (device + instance loaders)
+          L=tico-dolphin/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
+          grep -q "^namespace Vulkan$" "$L" || { echo "ERROR: loader namespace anchor not found"; exit 1; }
+          perl -0777 -pi -e 's/(namespace Vulkan\n\{)/#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic void NxLdrLog(const char* s){ if(g_drm_shim_log_sink) g_drm_shim_log_sink(s); }\n$1/' "$L"
+          perl -0777 -pi -e 's/(      ERROR_LOG_FMT\(HOST_GPU, "Vulkan: Failed to load required device function \{\}", name\);)/      { char _b[160]; snprintf(_b,sizeof _b,"DEVFN MISSING %s\\n", name); NxLdrLog(_b); }\n$1/' "$L"
+          perl -0777 -pi -e 's/(      ERROR_LOG_FMT\(HOST_GPU, "Vulkan: Failed to load required instance function \{\}", name\);)/      { char _b[160]; snprintf(_b,sizeof _b,"INSTFN MISSING %s\\n", name); NxLdrLog(_b); }\n$1/' "$L"
+          grep -q "DEVFN MISSING" "$L" || { echo "ERROR: device-loader probe missing"; exit 1; }
+          grep -q "INSTFN MISSING" "$L" || { echo "ERROR: instance-loader probe missing"; exit 1; }
+          echo "OK: loader probes in place (DEVFN/INSTFN)."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
