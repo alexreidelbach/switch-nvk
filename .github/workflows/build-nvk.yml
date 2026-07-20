@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v16  *** P2FIX2: HEAL THE WHOLE FAMILY ***
+# Cloud build for switch-nvk — v17  *** SHC: bracket the shader-compile phases ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -108,6 +108,17 @@ jobs:
           grep -q "vk_common_entrypoints.h" "$F" || { echo "ERROR: include missing"; exit 1; }
           grep -q "_nvk_force_link" "$F" || { echo "ERROR: force-link block missing"; exit 1; }
           echo "OK: P2FIX2 applied (12 symbols force-linked)."
+
+      - name: "SHC: bracket nvk_compile_shader phases (find the crash phase)"
+        run: |
+          set -e
+          F=mesa-25/src/nouveau/vulkan/nvk_shader.c
+          perl -0777 -pi -e 's/(   nvk_lower_nir\(dev, nir, info->flags, info->robustness,)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); char _s[64]; snprintf(_s,sizeof _s,"SHC A lower stage=%d\\n",(int)info->stage); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n#endif\n$1/' "$F"
+          perl -0777 -pi -e 's/(   result = nvk_compile_nir\(dev, nir,)/#ifdef __SWITCH__\n   { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC B nak-compile\\n"); }\n#endif\n$1/' "$F"
+          perl -0777 -pi -e 's/(      result = nvk_shader_upload\(dev, shader\);)/#ifdef __SWITCH__\n      { extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC C upload\\n"); }\n#endif\n$1\n#ifdef __SWITCH__\n      { extern void (*g_drm_shim_log_sink)(const char *); char _d[48]; snprintf(_d,sizeof _d,"SHC D done res=%d\\n",(int)result); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_d); }\n#endif/' "$F"
+          C=$(grep -c "SHC " "$F")
+          echo "SHC marker count (expect 4): $C"
+          [ "$C" = "4" ] || { echo "ERROR: SHC instrumentation incomplete"; exit 1; }
 
       - name: "Instrument wsi_device_init: WSICB + WSIDT + call brackets"
         run: |
