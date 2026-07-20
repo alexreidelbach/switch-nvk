@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v17  *** SHC: bracket the shader-compile phases ***
+# Cloud build for switch-nvk — v18  *** SHC+HEAP: per-compile heap telemetry (find what fills at ~47) ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -113,7 +113,9 @@ jobs:
         run: |
           set -e
           F=mesa-25/src/nouveau/vulkan/nvk_shader.c
-          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); char _s[64]; snprintf(_s,sizeof _s,"SHC A lower stage=%d\\n",(int)info->stage); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n${2}#endif\n${2}${3}/' "$F"
+          perl -0777 -pi -e 's/(#include "nvk_shader.h")/$1\n#ifdef __SWITCH__\n#include <malloc.h>\n#endif/' "$F"
+          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); static int _shc_n = 0; struct mallinfo _mi = mallinfo(); char _s[128]; snprintf(_s,sizeof _s,"SHC A n=%d stage=%d heap_used=%u heap_free=%u\\n",++_shc_n,(int)info->stage,(unsigned)_mi.uordblks,(unsigned)_mi.fordblks); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n${2}#endif\n${2}${3}/' "$F"
+          grep -q "malloc.h" "$F" || { echo "ERROR: malloc include missing"; exit 1; }
           perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_compile_nir\()/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC B nak-compile\\n"); }\n${2}#endif\n${2}${3}/' "$F"
           perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_shader_upload\(dev, shader\);)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC C upload\\n"); }\n${2}#endif\n${2}${3}\n${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); char _d[48]; snprintf(_d,sizeof _d,"SHC D done res=%d\\n",(int)result); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_d); }\n${2}#endif/g' "$F"
           A=$(grep -c '"SHC A' "$F"); B=$(grep -c '"SHC B' "$F"); C=$(grep -c '"SHC C' "$F"); D=$(grep -c '"SHC D' "$F")
