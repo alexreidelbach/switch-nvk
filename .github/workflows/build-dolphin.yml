@@ -165,6 +165,14 @@ jobs:
           grep -q "std::chrono::seconds(300)" "$M" || { echo "ERROR: watchdog patch did not apply"; exit 1; }
           echo "OK: startup watchdog extended to 300s."
 
+      - name: "HEAPINFO: log the real heap region at boot"
+        run: |
+          set -e
+          M=tico-dolphin/Source/Core/DolphinNX/main.cpp
+          perl -0777 -pi -e 's/(    LOG\("drm_shim debug sink installed\\n"\);)/$1\n    { extern char *fake_heap_start, *fake_heap_end; LOG("HEAPINFO region=%llu MB (start=%p end=%p)\\n", (unsigned long long)((fake_heap_end - fake_heap_start) >> 20), (void*)fake_heap_start, (void*)fake_heap_end); }/' "$M"
+          grep -q "HEAPINFO region" "$M" || { echo "ERROR: heapinfo probe did not apply"; exit 1; }
+          echo "OK: HEAPINFO probe in place."
+
       - name: Add missing link libraries (curl, mbedtls, expat, EGL)
         run: |
           set -e
