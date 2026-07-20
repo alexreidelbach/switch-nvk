@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v17  *** SHC: bracket the shader-compile phases ***
+# Cloud build for switch-nvk — v17  *** SHC: Bracket the shader-compile phases ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
