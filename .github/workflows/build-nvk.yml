@@ -113,17 +113,13 @@ jobs:
         run: |
           set -e
           F=mesa-25/src/nouveau/vulkan/nvk_shader.c
-          echo "--- anchor presence in the PATCHED file ---"
-          grep -n "nvk_lower_nir(dev, nir" "$F" | head -2 || true
-          grep -n "result = nvk_compile_nir(" "$F" | head -2 || true
-          grep -n "result = nvk_shader_upload(" "$F" | head -2 || true
-          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/$1$2#ifdef __SWITCH__\n$2{ extern void (*g_drm_shim_log_sink)(const char *); char _s[64]; snprintf(_s,sizeof _s,"SHC A lower stage=%d\\n",(int)info->stage); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n$2#endif\n$2$3/' "$F"
-          perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_compile_nir\()/$1$2#ifdef __SWITCH__\n$2{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC B nak-compile\\n"); }\n$2#endif\n$2$3/' "$F"
-          perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_shader_upload\(dev, shader\);)/$1$2#ifdef __SWITCH__\n$2{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC C upload\\n"); }\n$2#endif\n$2$3\n$2#ifdef __SWITCH__\n$2{ extern void (*g_drm_shim_log_sink)(const char *); char _d[48]; snprintf(_d,sizeof _d,"SHC D done res=%d\\n",(int)result); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_d); }\n$2#endif/' "$F"
+          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); char _s[64]; snprintf(_s,sizeof _s,"SHC A lower stage=%d\\n",(int)info->stage); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n${2}#endif\n${2}${3}/' "$F"
+          perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_compile_nir\()/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC B nak-compile\\n"); }\n${2}#endif\n${2}${3}/' "$F"
+          perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_shader_upload\(dev, shader\);)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC C upload\\n"); }\n${2}#endif\n${2}${3}\n${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); char _d[48]; snprintf(_d,sizeof _d,"SHC D done res=%d\\n",(int)result); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_d); }\n${2}#endif/g' "$F"
           A=$(grep -c '"SHC A' "$F"); B=$(grep -c '"SHC B' "$F"); C=$(grep -c '"SHC C' "$F"); D=$(grep -c '"SHC D' "$F")
-          echo "markers: A=$A B=$B C=$C D=$D (expect 1 each)"
-          [ "$A" = "1" ] && [ "$B" = "1" ] && [ "$C" = "1" ] && [ "$D" = "1" ] || { echo "ERROR: a marker missed — see anchor-presence lines above"; exit 1; }
-          echo "OK: SHC brackets in place."
+          echo "markers: A=$A B=$B C=$C D=$D (expect A=1 B=1 C=2 D=2)"
+          [ "$A" = "1" ] && [ "$B" = "1" ] && [ "$C" = "2" ] && [ "$D" = "2" ] || { echo "ERROR: marker counts wrong"; exit 1; }
+          echo "OK: SHC brackets in place (both upload sites covered)."
 
       - name: "Instrument wsi_device_init: WSICB + WSIDT + call brackets"
         run: |
