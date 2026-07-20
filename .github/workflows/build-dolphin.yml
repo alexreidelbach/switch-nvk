@@ -150,6 +150,15 @@ jobs:
           sed -i 's|static constexpr bool kNxLogEnabled = false;|static constexpr bool kNxLogEnabled = true;|' \
             tico-dolphin/Source/Core/DolphinNX/main.cpp
 
+      - name: "Extend startup watchdog 12s -> 300s (cold NAK shader compile needs time)"
+        run: |
+          set -e
+          M=tico-dolphin/Source/Core/DolphinNX/main.cpp
+          perl -pi -e 's/startup_started_at > std::chrono::seconds\(12\)/startup_started_at > std::chrono::seconds(300)/' "$M"
+          perl -pi -e 's/still at 0 presents after 12s/still at 0 presents after 300s/' "$M"
+          grep -q "std::chrono::seconds(300)" "$M" || { echo "ERROR: watchdog patch did not apply"; exit 1; }
+          echo "OK: startup watchdog extended to 300s."
+
       - name: Add missing link libraries (curl, mbedtls, expat, EGL)
         run: |
           set -e
