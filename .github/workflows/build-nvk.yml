@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v20 *** FINGERPRINT: identify shader #47 (Dolphin fixed utility pipeline) ***
+# Cloud build for switch-nvk — v21 *** LOCK + QUIET: mutex the EXEC handler (HayatoG TODO) + silence hot-path logs ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -176,22 +176,21 @@ jobs:
             exit $fail
           '
 
-      - name: "EXEC2: tid + step markers through the shim EXEC handler"
+      - name: "LOCK: wrap nouveau_exec in g_dev.lock (concurrency fix)"
         run: |
           set -e
           S=winsys/drm_shim.c
-          perl -0777 -pi -e 's/SHIM_LOG\("EXEC enter chan=%u push_count=%u wait=%u sig=%u\\n",/SHIM_LOG("EXEC enter chan=%u push_count=%u wait=%u sig=%u tid=%x\\n",/' "$S"
-          perl -0777 -pi -e 's/(SHIM_LOG\("EXEC enter chan=%u push_count=%u wait=%u sig=%u tid=%x\\n",[^;]*?)(\);)/${1}, (unsigned)(((uintptr_t)armGetTls())>>12)${2}/s' "$S"
-          perl -0777 -pi -e 's/(   nvGpuChannelAppendEntry\(&ch->chan, ch->cmdbuf_va, ch->fence_num_cmds,)/   SHIM_LOG("EXEC2 prefence tid=%x\\n",(unsigned)(((uintptr_t)armGetTls())>>12));\n$1/' "$S"
-          perl -0777 -pi -e 's/(   Result rc = kickoff_retry\(&ch->chan\);)/   SHIM_LOG("EXEC2 prekick tid=%x\\n",(unsigned)(((uintptr_t)armGetTls())>>12));\n$1/' "$S"
-          grep -q "EXEC2 prefence" "$S" || { echo "ERROR: prefence missing"; exit 1; }
-          grep -q "EXEC2 prekick" "$S" || { echo "ERROR: prekick missing"; exit 1; }
-          grep -q "tid=%x" "$S" || { echo "ERROR: tid missing"; exit 1; }
-          echo "OK: EXEC2 markers in place."
+          perl -0777 -pi -e 's/static int nouveau_exec\(struct drm_nouveau_exec \*req\)\n\{/static int nouveau_exec_unlocked(struct drm_nouveau_exec *req);\nstatic int nouveau_exec(struct drm_nouveau_exec *req)\n{\n   mutexLock(\&g_dev.lock);\n   int _rc = nouveau_exec_unlocked(req);\n   mutexUnlock(\&g_dev.lock);\n   return _rc;\n}\nstatic int nouveau_exec_unlocked(struct drm_nouveau_exec *req)\n{/' "$S"
+          grep -q "nouveau_exec_unlocked" "$S" || { echo "ERROR: lock wrapper did not apply"; exit 1; }
+          C=$(grep -c "nouveau_exec_unlocked" "$S")
+          echo "lock wrapper references: $C (expect 3)"
+          [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
+          echo "OK: nouveau_exec now fully serialized under g_dev.lock."
 
-      - name: Package nvk-switch install tree (with shim debug logging)
+      - name: "Package nvk-switch install tree (QUIET: no shim debug logging)"
         run: |
-          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g -DDRM_SHIM_DEBUG|' package-nvk.sh
+          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g|' package-nvk.sh
+          echo "QUIET build: DRM_SHIM_DEBUG not defined — hot-path SHIM_LOG compiled out."
           grep -n "drm_shim.c" package-nvk.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
