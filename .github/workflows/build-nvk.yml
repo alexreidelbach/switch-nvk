@@ -176,17 +176,6 @@ jobs:
             exit $fail
           '
 
-      - name: "LOCK: wrap nouveau_exec in g_dev.lock (concurrency fix)"
-        run: |
-          set -e
-          S=winsys/drm_shim.c
-          perl -0777 -pi -e 's/static int nouveau_exec\(struct drm_nouveau_exec \*req\)\n\{/static int nouveau_exec_unlocked(struct drm_nouveau_exec *req);\nstatic int nouveau_exec(struct drm_nouveau_exec *req)\n{\n   mutexLock(\&g_dev.lock);\n   int _rc = nouveau_exec_unlocked(req);\n   mutexUnlock(\&g_dev.lock);\n   return _rc;\n}\nstatic int nouveau_exec_unlocked(struct drm_nouveau_exec *req)\n{/' "$S"
-          grep -q "nouveau_exec_unlocked" "$S" || { echo "ERROR: lock wrapper did not apply"; exit 1; }
-          C=$(grep -c "nouveau_exec_unlocked" "$S")
-          echo "lock wrapper references: $C (expect 3)"
-          [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
-          echo "OK: nouveau_exec now fully serialized under g_dev.lock."
-
       - name: "Package nvk-switch install tree (QUIET: no shim debug logging)"
         run: |
           sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g|' package-nvk.sh
