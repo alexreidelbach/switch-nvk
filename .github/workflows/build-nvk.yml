@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v18  *** SHC+HEAP: per-compile heap telemetry (find what fills at ~47) ***
+# Cloud build for switch-nvk — v19b *** CANARY + EXEC2: thread-id markers through the unlocked EXEC handler ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -114,7 +114,21 @@ jobs:
           set -e
           F=mesa-25/src/nouveau/vulkan/nvk_shader.c
           perl -0777 -pi -e 's/(#include "nvk_shader.h")/$1\n#ifdef __SWITCH__\n#include <malloc.h>\n#endif/' "$F"
-          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); static int _shc_n = 0; struct mallinfo _mi = mallinfo(); char _s[128]; snprintf(_s,sizeof _s,"SHC A n=%d stage=%d heap_used=%u heap_free=%u\\n",++_shc_n,(int)info->stage,(unsigned)_mi.uordblks,(unsigned)_mi.fordblks); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s); }\n${2}#endif\n${2}${3}/' "$F"
+          perl -0777 -pi -e 's/(\n)([ \t]+)(nvk_lower_nir\(dev, nir)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); static int _shc_n = 0; struct mallinfo _mi = mallinfo(); char _s[128]; snprintf(_s,sizeof _s,"SHC A n=%d stage=%d heap_used=%u heap_free=%u\\n",++_shc_n,(int)info->stage,(unsigned)_mi.uordblks,(unsigned)_mi.fordblks); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_s);
+      /* canaries: plant one per compile, verify all older ones each time */
+      enum { _CN = 64, _CSZ = 64 };
+      static unsigned char *_can[_CN]; static int _can_n = 0;
+      for (int _i = 0; _i < _can_n; _i++) {
+         if (!_can[_i]) continue;
+         for (int _j = 0; _j < _CSZ; _j++) {
+            if (_can[_i][_j] != (unsigned char)(0xA5 ^ _i ^ _j)) {
+               char _c[160]; snprintf(_c,sizeof _c,"CANARY BAD slot=%d off=%d val=0x%02x at n=%d ptr=%p\\n",_i,_j,_can[_i][_j],_shc_n,(void*)_can[_i]);
+               if(g_drm_shim_log_sink)g_drm_shim_log_sink(_c);
+               _j = _CSZ; _i = _can_n; /* report first hit only */
+            }
+         }
+      }
+      if (_can_n < _CN) { _can[_can_n] = (unsigned char*)malloc(_CSZ); if (_can[_can_n]) { for (int _j = 0; _j < _CSZ; _j++) _can[_can_n][_j] = (unsigned char)(0xA5 ^ _can_n ^ _j); _can_n++; } } }\n${2}#endif\n${2}${3}/' "$F"
           grep -q "malloc.h" "$F" || { echo "ERROR: malloc include missing"; exit 1; }
           perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_compile_nir\()/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC B nak-compile\\n"); }\n${2}#endif\n${2}${3}/' "$F"
           perl -0777 -pi -e 's/(\n)([ \t]+)(result = nvk_shader_upload\(dev, shader\);)/${1}${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); if(g_drm_shim_log_sink)g_drm_shim_log_sink("SHC C upload\\n"); }\n${2}#endif\n${2}${3}\n${2}#ifdef __SWITCH__\n${2}{ extern void (*g_drm_shim_log_sink)(const char *); char _d[48]; snprintf(_d,sizeof _d,"SHC D done res=%d\\n",(int)result); if(g_drm_shim_log_sink)g_drm_shim_log_sink(_d); }\n${2}#endif/g' "$F"
@@ -176,6 +190,19 @@ jobs:
             done
             exit $fail
           '
+
+      - name: "EXEC2: tid + step markers through the shim EXEC handler"
+        run: |
+          set -e
+          S=winsys/drm_shim.c
+          perl -0777 -pi -e 's/SHIM_LOG\("EXEC enter chan=%u push_count=%u wait=%u sig=%u\\n",/SHIM_LOG("EXEC enter chan=%u push_count=%u wait=%u sig=%u tid=%x\\n",/' "$S"
+          perl -0777 -pi -e 's/(SHIM_LOG\("EXEC enter chan=%u push_count=%u wait=%u sig=%u tid=%x\\n",[^;]*?)(\);)/${1}, (unsigned)(((uintptr_t)armGetTls())>>12)${2}/s' "$S"
+          perl -0777 -pi -e 's/(   nvGpuChannelAppendEntry\(&ch->chan, ch->cmdbuf_va, ch->fence_num_cmds,)/   SHIM_LOG("EXEC2 prefence tid=%x\\n",(unsigned)(((uintptr_t)armGetTls())>>12));\n$1/' "$S"
+          perl -0777 -pi -e 's/(   Result rc = kickoff_retry\(&ch->chan\);)/   SHIM_LOG("EXEC2 prekick tid=%x\\n",(unsigned)(((uintptr_t)armGetTls())>>12));\n$1/' "$S"
+          grep -q "EXEC2 prefence" "$S" || { echo "ERROR: prefence missing"; exit 1; }
+          grep -q "EXEC2 prekick" "$S" || { echo "ERROR: prekick missing"; exit 1; }
+          grep -q "tid=%x" "$S" || { echo "ERROR: tid missing"; exit 1; }
+          echo "OK: EXEC2 markers in place."
 
       - name: Package nvk-switch install tree (with shim debug logging)
         run: |
