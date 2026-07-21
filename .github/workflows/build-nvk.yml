@@ -176,6 +176,32 @@ jobs:
             exit $fail
           '
 
+      - name: "LOCK: wrap nouveau_exec in g_dev.lock (concurrency fix)"
+        run: |
+          set -e
+          S=winsys/drm_shim.c
+          perl -0777 -pi -e 's/static int nouveau_exec\(struct drm_nouveau_exec \*req\)\n\{/static int nouveau_exec_unlocked(struct drm_nouveau_exec *req);\nstatic int nouveau_exec(struct drm_nouveau_exec *req)\n{\n   mutexLock(\&g_dev.lock);\n   int _rc = nouveau_exec_unlocked(req);\n   mutexUnlock(\&g_dev.lock);\n   return _rc;\n}\nstatic int nouveau_exec_unlocked(struct drm_nouveau_exec *req)\n{/' "$S"
+          grep -q "nouveau_exec_unlocked" "$S" || { echo "ERROR: lock wrapper did not apply"; exit 1; }
+          C=$(grep -c "nouveau_exec_unlocked" "$S")
+          echo "lock wrapper references: $C (expect 3)"
+          [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
+          echo "OK: nouveau_exec now fully serialized under g_dev.lock."
+
+      - name: "PIPELINE: defer per-submit drain to next submit (one-deep async)"
+        run: |
+          set -e
+          S=winsys/drm_shim.c
+          # 1) add deferred-fence state to shim_channel
+          perl -0777 -pi -e 's/(   int          zcull_bo;        \/\* bos\[\] slot for the Zcull context           \*\/\n\};)/   NvFence      pending_fence;   \/* deferred drain: last submit\x27s fence      *\/\n   bool         has_pending;     \/* a submit is in-flight, not yet drained     *\/\n$1/' "$S"
+          grep -q "has_pending" "$S" || { echo "ERROR: struct field insert failed"; exit 1; }
+          # 2) drain the PREVIOUS submit at the entry of the handler (anchor: EXEC enter log)
+          perl -0777 -pi -e 's/(\n   SHIM_LOG\("EXEC enter chan=%u)/\n   if (ch->has_pending) { nvFenceWait(\&ch->pending_fence, 2000000LL); ch->has_pending = false; }  \/* PIPELINE: drain previous *\/$1/' "$S"
+          grep -q "PIPELINE: drain previous" "$S" || { echo "ERROR: pre-drain insert failed"; exit 1; }
+          # 3) replace the immediate post-kickoff drain with: stash fence, defer
+          perl -0777 -pi -e 's/   Result wr = nvFenceWait\(&fence, 2000000LL\);\n   SHIM_LOG\("EXEC drain chan=%u fence=%u\/%u rc=0x%x\\n",\n            \(unsigned\)req->channel, fence.id, fence.value, wr\);/   \/* PIPELINE: do NOT drain here; stash and let the NEXT submit drain it. *\/\n   ch->pending_fence = fence;\n   ch->has_pending = true;/' "$S"
+          grep -q "let the NEXT submit drain it" "$S" || { echo "ERROR: defer replace failed"; exit 1; }
+          echo "OK: drain deferred (one-deep pipeline). Channel never overlaps its own submits."
+
       - name: "Package nvk-switch install tree (QUIET: no shim debug logging)"
         run: |
           sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g|' package-nvk.sh
