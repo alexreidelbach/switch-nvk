@@ -187,42 +187,24 @@ jobs:
           [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
           echo "OK: nouveau_exec now fully serialized under g_dev.lock."
 
-      - name: "PIPELINE2: defer drain, but drain before any destructive GPU op"
+      - name: "SLIMEXEC: compile out the per-submit diagnostic syscalls"
         run: |
           set -e
           S=winsys/drm_shim.c
-          # 1) per-channel deferred-fence state
-          perl -0777 -pi -e 's/(   int          zcull_bo;        \/\* bos\[\] slot for the Zcull context           \*\/\n\};)/   NvFence      pending_fence;\n   bool         has_pending;\n$1/' "$S"
-          # 2) drain helper, defined BEFORE its first use (drmCloseBufferHandle)
-          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{)/static void shim_drain_all_pending(void)\n{\n   for (int _i = 0; _i < SHIM_MAX_CHANNELS; _i++) {\n      struct shim_channel *_c = \&g_dev.channels[_i];\n      if (_c->used \&\& _c->has_pending) {\n         nvFenceWait(\&_c->pending_fence, 2000000LL);\n         _c->has_pending = false;\n      }\n   }\n}\n\n$1/' "$S"
-          # 3) GPU must be idle before a buffer it may be reading is freed
-          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{\n   if \(!drm_shim_owns_fd\(fd\)\) \{ errno = EBADF; return -EBADF; \}\n   mutexLock\(&g_dev\.lock\);)/$1\n   shim_drain_all_pending();/' "$S"
-          # 4) ...and before any GPU VA is unmapped
-          perl -0777 -pi -e 's/(   if \(is_unmap\) \{\n)/$1      shim_drain_all_pending();\n/' "$S"
-          # 5) drain the PREVIOUS submit on this channel at handler entry
-          perl -0777 -pi -e 's/(\n   SHIM_LOG\("EXEC enter chan=%u)/\n   if (ch->has_pending) { nvFenceWait(\&ch->pending_fence, 2000000LL); ch->has_pending = false; }$1/' "$S"
-          # 6) stash this submit's fence instead of blocking on it
-          perl -0777 -pi -e 's/   Result wr = nvFenceWait\(&fence, 2000000LL\);\n   SHIM_LOG\("EXEC drain chan=%u fence=%u\/%u rc=0x%x\\n",\n            \(unsigned\)req->channel, fence.id, fence.value, wr\);/   ch->pending_fence = fence;\n   ch->has_pending = true;/' "$S"
-          HL=$(grep -n "shim_drain_all_pending(void)" "$S" | head -1 | cut -d: -f1)
-          FU=$(grep -n "shim_drain_all_pending();" "$S" | head -1 | cut -d: -f1)
-          echo "helper at $HL, first use at $FU"
-          [ -n "$HL" ] && [ -n "$FU" ] && [ "$HL" -lt "$FU" ] || { echo "ERROR: helper ordering wrong"; exit 1; }
-          C=$(grep -c "shim_drain_all_pending();" "$S" || true); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S" || true); D=$(grep -c "ch->has_pending = true" "$S" || true); O=$(grep -c "Result wr = nvFenceWait" "$S" || true)
-          echo "calls=$C predrain=$P defer=$D olddrain=$O (expect 2 1 1 0)"
-          [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
-          perl -0777 -pi -e 's/(static void shim_drain_all_pending\(void\)\n\{)/$1\n   SHIM_LOG("PIPE drain_all enter\\n");/' "$S"
-          perl -0777 -pi -e 's/(   ch->pending_fence = fence;\n   ch->has_pending = true;)/   SHIM_LOG("PIPE defer chan=%u fence=%u\/%u\\n", (unsigned)req->channel, fence.id, fence.value);\n$1/' "$S"
-          perl -0777 -pi -e 's/(   if \(ch->has_pending\) \{ nvFenceWait)/   if (ch->has_pending) SHIM_LOG("PIPE predrain chan=%u\\n", (unsigned)req->channel);\n$1/' "$S"
-          grep -q "PIPE drain_all enter" "$S" || { echo "ERROR: drain marker missing"; exit 1; }
-          grep -q "PIPE defer chan" "$S" || { echo "ERROR: defer marker missing"; exit 1; }
-          grep -q "PIPE predrain chan" "$S" || { echo "ERROR: predrain marker missing"; exit 1; }
-          echo "OK: PIPE markers in place."
-          echo "OK: pipelined submits with drains guarding every destructive op."
+          # Every submit currently runs nvioctlNvhostCtrl_SyncptRead + GetErrorNotification
+          # (+GetErrorInfo) even in release: only the SHIM_LOG text is compiled out, not the
+          # syscalls. They are pure diagnostics -> guard the whole region with DRM_SHIM_DEBUG.
+          perl -0777 -pi -e 's/(\n   \{\n      u32 cur = 0;)/\n#ifdef DRM_SHIM_DEBUG$1/' "$S"
+          perl -0777 -pi -e 's/(                  err\.info\[8\], err\.info\[9\], err\.info\[10\], err\.info\[11\]\);\n   \}\n)/$1#endif\n/' "$S"
+          # verify: ifdef immediately precedes the syncpt-read block, endif precedes return 0
+          grep -B2 "u32 cur = 0;" "$S" | grep -q "#ifdef DRM_SHIM_DEBUG" || { echo "ERROR: ifdef not placed"; exit 1; }
+          grep -A3 "err.info\[11\]" "$S" | grep -q "#endif" || { echo "ERROR: endif not placed"; exit 1; }
+          echo "OK: per-submit SyncptRead + error-notifier reads now debug-only."
 
-      - name: "Package nvk-switch install tree (LOUD: shim debug logging ON)"
+      - name: "Package nvk-switch install tree (QUIET: release, no shim diagnostics)"
         run: |
-          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g -DDRM_SHIM_DEBUG|' package-nvk.sh
-          echo "LOUD build: DRM_SHIM_DEBUG defined — diagnostic run, expect slow but verbose."
+          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g|' package-nvk.sh
+          echo "QUIET build: no DRM_SHIM_DEBUG — SHIM_LOG and the per-submit diagnostic syscalls compiled out."
           grep -n "drm_shim.c" package-nvk.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
