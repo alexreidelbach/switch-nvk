@@ -207,7 +207,7 @@ jobs:
           FU=$(grep -n "shim_drain_all_pending();" "$S" | head -1 | cut -d: -f1)
           echo "helper at $HL, first use at $FU"
           [ -n "$HL" ] && [ -n "$FU" ] && [ "$HL" -lt "$FU" ] || { echo "ERROR: helper ordering wrong"; exit 1; }
-          C=$(grep -c "shim_drain_all_pending();" "$S"); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S"); D=$(grep -c "ch->has_pending = true" "$S"); O=$(grep -c "Result wr = nvFenceWait" "$S")
+          C=$(grep -c "shim_drain_all_pending();" "$S" || true); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S" || true); D=$(grep -c "ch->has_pending = true" "$S" || true); O=$(grep -c "Result wr = nvFenceWait" "$S" || true)
           echo "calls=$C predrain=$P defer=$D olddrain=$O (expect 2 1 1 0)"
           [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
           echo "OK: pipelined submits with drains guarding every destructive op."
