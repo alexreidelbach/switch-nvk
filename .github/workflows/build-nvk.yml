@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v21 *** LOCK + QUIET: mutex the EXEC handler (HayatoG TODO) + silence hot-path logs ***
+# Cloud build for switch-nvk — v27 *** PIPELINE: deferred drain on a clean base (no LOCK step) ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -176,30 +176,32 @@ jobs:
             exit $fail
           '
 
-      - name: "LOCK: wrap nouveau_exec in g_dev.lock (concurrency fix)"
+      - name: "PIPELINE: defer the per-submit drain, sync before destructive ops"
         run: |
           set -e
           S=winsys/drm_shim.c
-          perl -0777 -pi -e 's/static int nouveau_exec\(struct drm_nouveau_exec \*req\)\n\{/static int nouveau_exec_unlocked(struct drm_nouveau_exec *req);\nstatic int nouveau_exec(struct drm_nouveau_exec *req)\n{\n   mutexLock(\&g_dev.lock);\n   int _rc = nouveau_exec_unlocked(req);\n   mutexUnlock(\&g_dev.lock);\n   return _rc;\n}\nstatic int nouveau_exec_unlocked(struct drm_nouveau_exec *req)\n{/' "$S"
-          grep -q "nouveau_exec_unlocked" "$S" || { echo "ERROR: lock wrapper did not apply"; exit 1; }
-          C=$(grep -c "nouveau_exec_unlocked" "$S")
-          echo "lock wrapper references: $C (expect 3)"
-          [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
-          echo "OK: nouveau_exec now fully serialized under g_dev.lock."
-
-      - name: "SLIMEXEC: compile out the per-submit diagnostic syscalls"
-        run: |
-          set -e
-          S=winsys/drm_shim.c
-          # Every submit currently runs nvioctlNvhostCtrl_SyncptRead + GetErrorNotification
-          # (+GetErrorInfo) even in release: only the SHIM_LOG text is compiled out, not the
-          # syscalls. They are pure diagnostics -> guard the whole region with DRM_SHIM_DEBUG.
-          perl -0777 -pi -e 's/(\n   \{\n      u32 cur = 0;)/\n#ifdef DRM_SHIM_DEBUG$1/' "$S"
-          perl -0777 -pi -e 's/(                  err\.info\[8\], err\.info\[9\], err\.info\[10\], err\.info\[11\]\);\n   \}\n)/$1#endif\n/' "$S"
-          # verify: ifdef immediately precedes the syncpt-read block, endif precedes return 0
-          grep -B2 "u32 cur = 0;" "$S" | grep -q "#ifdef DRM_SHIM_DEBUG" || { echo "ERROR: ifdef not placed"; exit 1; }
-          grep -A3 "err.info\[11\]" "$S" | grep -q "#endif" || { echo "ERROR: endif not placed"; exit 1; }
-          echo "OK: per-submit SyncptRead + error-notifier reads now debug-only."
+          # sanity: the deadlock-causing LOCK wrapper must NOT be present
+          grep -q "nouveau_exec_unlocked" "$S" && { echo "ERROR: LOCK wrapper present"; exit 1; }
+          # 1) per-channel deferred fence state
+          perl -0777 -pi -e 's/(   int          zcull_bo;        \/\* bos\[\] slot for the Zcull context           \*\/\n\};)/   NvFence      pending_fence;\n   bool         has_pending;\n$1/' "$S"
+          # 2) drain helper, defined before its first use
+          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{)/static void shim_drain_all_pending(void)\n{\n   for (int _i = 0; _i < SHIM_MAX_CHANNELS; _i++) {\n      struct shim_channel *_c = \&g_dev.channels[_i];\n      if (_c->used \&\& _c->has_pending) {\n         nvFenceWait(\&_c->pending_fence, 2000000LL);\n         _c->has_pending = false;\n      }\n   }\n}\n\n$1/' "$S"
+          # 3) GPU idle before a buffer is freed
+          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{\n   if \(!drm_shim_owns_fd\(fd\)\) \{ errno = EBADF; return -EBADF; \}\n   mutexLock\(&g_dev\.lock\);)/$1\n   shim_drain_all_pending();/' "$S"
+          # 4) GPU idle before any VA unmap
+          perl -0777 -pi -e 's/(   if \(is_unmap\) \{\n)/$1      shim_drain_all_pending();\n/' "$S"
+          # 5) drain the PREVIOUS submit on this channel at handler entry
+          perl -0777 -pi -e 's/(\n   SHIM_LOG\("EXEC enter chan=%u)/\n   if (ch->has_pending) { nvFenceWait(\&ch->pending_fence, 2000000LL); ch->has_pending = false; }$1/' "$S"
+          # 6) stash this submit fence instead of blocking on it
+          perl -0777 -pi -e 's/   Result wr = nvFenceWait\(&fence, 2000000LL\);\n   SHIM_LOG\("EXEC drain chan=%u fence=%u\/%u rc=0x%x\\n",\n            \(unsigned\)req->channel, fence.id, fence.value, wr\);/   ch->pending_fence = fence;\n   ch->has_pending = true;/' "$S"
+          HL=$(grep -n "shim_drain_all_pending(void)" "$S" | head -1 | cut -d: -f1)
+          FU=$(grep -n "shim_drain_all_pending();" "$S" | head -1 | cut -d: -f1)
+          C=$(grep -c "shim_drain_all_pending();" "$S" || true); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S" || true)
+          D=$(grep -c "ch->has_pending = true" "$S" || true); O=$(grep -c "Result wr = nvFenceWait" "$S" || true)
+          echo "helper=$HL firstuse=$FU calls=$C predrain=$P defer=$D olddrain=$O (expect calls=2 predrain=1 defer=1 olddrain=0)"
+          [ "$HL" -lt "$FU" ] || { echo "ERROR: helper after first use"; exit 1; }
+          [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
+          echo "OK: submits pipelined; drains guard every destructive op."
 
       - name: "Package nvk-switch install tree (QUIET: release, no shim diagnostics)"
         run: |
