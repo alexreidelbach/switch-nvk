@@ -210,12 +210,19 @@ jobs:
           C=$(grep -c "shim_drain_all_pending();" "$S" || true); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S" || true); D=$(grep -c "ch->has_pending = true" "$S" || true); O=$(grep -c "Result wr = nvFenceWait" "$S" || true)
           echo "calls=$C predrain=$P defer=$D olddrain=$O (expect 2 1 1 0)"
           [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
+          perl -0777 -pi -e 's/(static void shim_drain_all_pending\(void\)\n\{)/$1\n   SHIM_LOG("PIPE drain_all enter\\n");/' "$S"
+          perl -0777 -pi -e 's/(   ch->pending_fence = fence;\n   ch->has_pending = true;)/   SHIM_LOG("PIPE defer chan=%u fence=%u\/%u\\n", (unsigned)req->channel, fence.id, fence.value);\n$1/' "$S"
+          perl -0777 -pi -e 's/(   if \(ch->has_pending\) \{ nvFenceWait)/   if (ch->has_pending) SHIM_LOG("PIPE predrain chan=%u\\n", (unsigned)req->channel);\n$1/' "$S"
+          grep -q "PIPE drain_all enter" "$S" || { echo "ERROR: drain marker missing"; exit 1; }
+          grep -q "PIPE defer chan" "$S" || { echo "ERROR: defer marker missing"; exit 1; }
+          grep -q "PIPE predrain chan" "$S" || { echo "ERROR: predrain marker missing"; exit 1; }
+          echo "OK: PIPE markers in place."
           echo "OK: pipelined submits with drains guarding every destructive op."
 
-      - name: "Package nvk-switch install tree (QUIET: no shim debug logging)"
+      - name: "Package nvk-switch install tree (LOUD: shim debug logging ON)"
         run: |
-          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g|' package-nvk.sh
-          echo "QUIET build: DRM_SHIM_DEBUG not defined — hot-path SHIM_LOG compiled out."
+          sed -i 's|\(-c winsys/drm_shim.c .*\)-O2|\1-O2 -g -DDRM_SHIM_DEBUG|' package-nvk.sh
+          echo "LOUD build: DRM_SHIM_DEBUG defined — diagnostic run, expect slow but verbose."
           grep -n "drm_shim.c" package-nvk.sh
           docker run --rm -v "$PWD:/work" -w /work switch-nvk-build bash package-nvk.sh
 
