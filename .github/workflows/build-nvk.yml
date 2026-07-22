@@ -187,20 +187,30 @@ jobs:
           [ "$C" = "3" ] || { echo "ERROR: unexpected reference count"; exit 1; }
           echo "OK: nouveau_exec now fully serialized under g_dev.lock."
 
-      - name: "PIPELINE: defer per-submit drain to next submit (one-deep async)"
+      - name: "PIPELINE2: defer drain, but drain before any destructive GPU op"
         run: |
           set -e
           S=winsys/drm_shim.c
-          # 1) add deferred-fence state to shim_channel
-          perl -0777 -pi -e 's/(   int          zcull_bo;        \/\* bos\[\] slot for the Zcull context           \*\/\n\};)/   NvFence      pending_fence;   \/* deferred drain: last submit\x27s fence      *\/\n   bool         has_pending;     \/* a submit is in-flight, not yet drained     *\/\n$1/' "$S"
-          grep -q "has_pending" "$S" || { echo "ERROR: struct field insert failed"; exit 1; }
-          # 2) drain the PREVIOUS submit at the entry of the handler (anchor: EXEC enter log)
-          perl -0777 -pi -e 's/(\n   SHIM_LOG\("EXEC enter chan=%u)/\n   if (ch->has_pending) { nvFenceWait(\&ch->pending_fence, 2000000LL); ch->has_pending = false; }  \/* PIPELINE: drain previous *\/$1/' "$S"
-          grep -q "PIPELINE: drain previous" "$S" || { echo "ERROR: pre-drain insert failed"; exit 1; }
-          # 3) replace the immediate post-kickoff drain with: stash fence, defer
-          perl -0777 -pi -e 's/   Result wr = nvFenceWait\(&fence, 2000000LL\);\n   SHIM_LOG\("EXEC drain chan=%u fence=%u\/%u rc=0x%x\\n",\n            \(unsigned\)req->channel, fence.id, fence.value, wr\);/   \/* PIPELINE: do NOT drain here; stash and let the NEXT submit drain it. *\/\n   ch->pending_fence = fence;\n   ch->has_pending = true;/' "$S"
-          grep -q "let the NEXT submit drain it" "$S" || { echo "ERROR: defer replace failed"; exit 1; }
-          echo "OK: drain deferred (one-deep pipeline). Channel never overlaps its own submits."
+          # 1) per-channel deferred-fence state
+          perl -0777 -pi -e 's/(   int          zcull_bo;        \/\* bos\[\] slot for the Zcull context           \*\/\n\};)/   NvFence      pending_fence;\n   bool         has_pending;\n$1/' "$S"
+          # 2) drain helper, defined BEFORE its first use (drmCloseBufferHandle)
+          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{)/static void shim_drain_all_pending(void)\n{\n   for (int _i = 0; _i < SHIM_MAX_CHANNELS; _i++) {\n      struct shim_channel *_c = \&g_dev.channels[_i];\n      if (_c->used \&\& _c->has_pending) {\n         nvFenceWait(\&_c->pending_fence, 2000000LL);\n         _c->has_pending = false;\n      }\n   }\n}\n\n$1/' "$S"
+          # 3) GPU must be idle before a buffer it may be reading is freed
+          perl -0777 -pi -e 's/(int drmCloseBufferHandle\(int fd, uint32_t handle\)\n\{\n   if \(!drm_shim_owns_fd\(fd\)\) \{ errno = EBADF; return -EBADF; \}\n   mutexLock\(&g_dev\.lock\);)/$1\n   shim_drain_all_pending();/' "$S"
+          # 4) ...and before any GPU VA is unmapped
+          perl -0777 -pi -e 's/(   if \(is_unmap\) \{\n)/$1      shim_drain_all_pending();\n/' "$S"
+          # 5) drain the PREVIOUS submit on this channel at handler entry
+          perl -0777 -pi -e 's/(\n   SHIM_LOG\("EXEC enter chan=%u)/\n   if (ch->has_pending) { nvFenceWait(\&ch->pending_fence, 2000000LL); ch->has_pending = false; }$1/' "$S"
+          # 6) stash this submit's fence instead of blocking on it
+          perl -0777 -pi -e 's/   Result wr = nvFenceWait\(&fence, 2000000LL\);\n   SHIM_LOG\("EXEC drain chan=%u fence=%u\/%u rc=0x%x\\n",\n            \(unsigned\)req->channel, fence.id, fence.value, wr\);/   ch->pending_fence = fence;\n   ch->has_pending = true;/' "$S"
+          HL=$(grep -n "shim_drain_all_pending(void)" "$S" | head -1 | cut -d: -f1)
+          FU=$(grep -n "shim_drain_all_pending();" "$S" | head -1 | cut -d: -f1)
+          echo "helper at $HL, first use at $FU"
+          [ -n "$HL" ] && [ -n "$FU" ] && [ "$HL" -lt "$FU" ] || { echo "ERROR: helper ordering wrong"; exit 1; }
+          C=$(grep -c "shim_drain_all_pending();" "$S"); P=$(grep -c "if (ch->has_pending) { nvFenceWait" "$S"); D=$(grep -c "ch->has_pending = true" "$S"); O=$(grep -c "Result wr = nvFenceWait" "$S")
+          echo "calls=$C predrain=$P defer=$D olddrain=$O (expect 2 1 1 0)"
+          [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
+          echo "OK: pipelined submits with drains guarding every destructive op."
 
       - name: "Package nvk-switch install tree (QUIET: no shim debug logging)"
         run: |
