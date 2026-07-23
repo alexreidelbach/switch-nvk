@@ -160,13 +160,19 @@ jobs:
         run: |
           set -e
           K=tico-dolphin/Source/Core/Core/IOS/Network/Socket.cpp
-          grep -q "void WiiSockMan::Update()" "$K" || { echo "ERROR: Update() anchor missing"; exit 1; }
-          perl -0777 -pi -e 's/(#include <sys\/select.h>)/$1\n#ifdef __SWITCH__\n#include <chrono>\n#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic unsigned long long s_net_calls = 0, s_net_us = 0;\nstatic std::chrono::steady_clock::time_point s_net_last = std::chrono::steady_clock::now();\n#endif/' "$K"
-          perl -0777 -pi -e 's/(void WiiSockMan::Update\(\)\n\{\n)/$1#ifdef __SWITCH__\n  const auto _nt0 = std::chrono::steady_clock::now();\n#endif\n/' "$K"
+          perl -0777 -pi -e 's/(#include "Core\/IOS\/Network\/Socket.h")/$1\n#ifdef __SWITCH__\n#include <chrono>\n#include <cstdio>\n#endif/' "$K"
+          perl -0777 -pi -e 's/(void WiiSockMan::Update\(\)\n\{\n)/#ifdef __SWITCH__\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic unsigned long long s_net_calls = 0, s_net_us = 0;\nstatic std::chrono::steady_clock::time_point s_net_last = std::chrono::steady_clock::now();\n#endif\n$1#ifdef __SWITCH__\n  const auto _nt0 = std::chrono::steady_clock::now();\n#endif\n/' "$K"
           perl -0777 -pi -e 's/(  UpdatePollCommands\(\);\n\})/  UpdatePollCommands();\n#ifdef __SWITCH__\n  {\n    const auto _nt1 = std::chrono::steady_clock::now();\n    s_net_us += (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(_nt1 - _nt0).count();\n    s_net_calls++;\n    if (_nt1 - s_net_last >= std::chrono::seconds(1)) {\n      char _nb[160];\n      snprintf(_nb, sizeof _nb, "NETSTAT calls=%llu\/s in_update=%llums\/s socks=%u\\n", s_net_calls, s_net_us \/ 1000ULL, (unsigned)WiiSockets.size());\n      if (g_drm_shim_log_sink) g_drm_shim_log_sink(_nb);\n      s_net_calls = 0; s_net_us = 0; s_net_last = _nt1;\n    }\n  }\n#endif\n}/' "$K"
-          grep -q "NETSTAT calls" "$K" || { echo "ERROR: netstat summary missing"; exit 1; }
-          grep -q "_nt0 = std::chrono" "$K" || { echo "ERROR: start timer missing"; exit 1; }
-          echo "OK: socket pump instrumented (NETSTAT once per second)."
+          A=$(grep -c "#include <cstdio>" "$K" || true)
+          B=$(grep -c "s_net_calls = 0, s_net_us" "$K" || true)
+          T=$(grep -c "_nt0 = std::chrono" "$K" || true)
+          C=$(grep -c "NETSTAT calls" "$K" || true)
+          echo "includes=$A decls=$B timer=$T summary=$C (all must be 1)"
+          [ "$A" = "1" ] && [ "$B" = "1" ] && [ "$T" = "1" ] && [ "$C" = "1" ] || { echo "ERROR: an insertion failed"; exit 1; }
+          DL=$(grep -n "s_net_calls = 0, s_net_us" "$K" | cut -d: -f1)
+          UL=$(grep -n "void WiiSockMan::Update()" "$K" | cut -d: -f1)
+          [ "$DL" -lt "$UL" ] || { echo "ERROR: declarations after Update()"; exit 1; }
+          echo "OK: socket pump instrumented (decls at $DL, Update at $UL)."
 
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
