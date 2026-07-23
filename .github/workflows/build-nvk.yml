@@ -1,4 +1,4 @@
-# Cloud build for switch-nvk — v27 *** PIPELINE: deferred drain on a clean base (no LOCK step) ***
+# Cloud build for switch-nvk — v28 *** PIPELINE + narrow SLIMEXEC: also drop the per-submit SyncptRead ioctl ***
 # v15's P2FIX cured Properties2 -> vkCreateDevice now returns VK_SUCCESS and the
 # GPU executes+retires its first command buffer. The DEVFN probe then named 12
 # more NULL device functions — all victims of the same linker disease, living in
@@ -202,6 +202,16 @@ jobs:
           [ "$HL" -lt "$FU" ] || { echo "ERROR: helper after first use"; exit 1; }
           [ "$C" = "2" ] && [ "$P" = "1" ] && [ "$D" = "1" ] && [ "$O" = "0" ] || { echo "ERROR: patch counts wrong"; exit 1; }
           echo "OK: submits pipelined; drains guard every destructive op."
+          # 7) the per-submit syncpt READ is a pure diagnostic ioctl that runs even in
+          #    release (only its SHIM_LOG compiles out). CPU is now the bottleneck, so
+          #    drop it. The error-notifier read is LEFT ALONE: it likely clears latched
+          #    channel error state and removing it wedged the channel last time.
+          perl -0777 -pi -e 's/(\n   \{\n      u32 cur = 0;)/\n#ifdef DRM_SHIM_DEBUG$1/' "$S"
+          perl -0777 -pi -e 's/(\n   \/\* Read the channel error notifier:)/\n#endif$1/' "$S"
+          grep -B2 "u32 cur = 0;" "$S" | grep -q "#ifdef DRM_SHIM_DEBUG" || { echo "ERROR: slim ifdef not placed"; exit 1; }
+          grep -B3 "Read the channel error notifier" "$S" | grep -q "#endif" || { echo "ERROR: slim endif not placed"; exit 1; }
+          grep -q "nvGpuChannelGetErrorNotification" "$S" || { echo "ERROR: notifier read must remain"; exit 1; }
+          echo "OK: per-submit SyncptRead is debug-only; error notifier untouched."
 
       - name: "Package nvk-switch install tree (QUIET: release, no shim diagnostics)"
         run: |
