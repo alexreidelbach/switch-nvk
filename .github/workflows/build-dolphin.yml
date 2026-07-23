@@ -156,6 +156,18 @@ jobs:
           grep -q "socketGetDefaultInitConfig" "$M" || { echo "ERROR: config copy missing"; exit 1; }
           echo "OK: socket buffers enlarged (falls back to defaults if init fails)."
 
+      - name: "NETSTAT: measure time spent in the Wii socket pump (online diagnosis)"
+        run: |
+          set -e
+          K=tico-dolphin/Source/Core/Core/IOS/Network/Socket.cpp
+          grep -q "void WiiSockMan::Update()" "$K" || { echo "ERROR: Update() anchor missing"; exit 1; }
+          perl -0777 -pi -e 's/(#include <sys\/select.h>)/$1\n#ifdef __SWITCH__\n#include <chrono>\n#include <cstdio>\nextern "C" { extern void (*g_drm_shim_log_sink)(const char*); }\nstatic unsigned long long s_net_calls = 0, s_net_us = 0;\nstatic std::chrono::steady_clock::time_point s_net_last = std::chrono::steady_clock::now();\n#endif/' "$K"
+          perl -0777 -pi -e 's/(void WiiSockMan::Update\(\)\n\{\n)/$1#ifdef __SWITCH__\n  const auto _nt0 = std::chrono::steady_clock::now();\n#endif\n/' "$K"
+          perl -0777 -pi -e 's/(  UpdatePollCommands\(\);\n\})/  UpdatePollCommands();\n#ifdef __SWITCH__\n  {\n    const auto _nt1 = std::chrono::steady_clock::now();\n    s_net_us += (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(_nt1 - _nt0).count();\n    s_net_calls++;\n    if (_nt1 - s_net_last >= std::chrono::seconds(1)) {\n      char _nb[160];\n      snprintf(_nb, sizeof _nb, "NETSTAT calls=%llu\/s in_update=%llums\/s socks=%u\\n", s_net_calls, s_net_us \/ 1000ULL, (unsigned)WiiSockets.size());\n      if (g_drm_shim_log_sink) g_drm_shim_log_sink(_nb);\n      s_net_calls = 0; s_net_us = 0; s_net_last = _nt1;\n    }\n  }\n#endif\n}/' "$K"
+          grep -q "NETSTAT calls" "$K" || { echo "ERROR: netstat summary missing"; exit 1; }
+          grep -q "_nt0 = std::chrono" "$K" || { echo "ERROR: start timer missing"; exit 1; }
+          echo "OK: socket pump instrumented (NETSTAT once per second)."
+
       - name: Add linker wrap flags required by the NVK fat lib
         run: |
           sed -i 's|switch.specs"|switch.specs -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=stat -Wl,--wrap=lstat"|' \
